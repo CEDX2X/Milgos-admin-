@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="fr" class="h-full bg-slate-100 text-slate-900">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+    <title>Milgos</title>
+    <link rel="manifest" href="/manifest.json" />
+    <meta name="theme-color" content="#FFFFFF" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
+    <meta name="apple-mobile-web-app-title" content="Milgos" />
+
+    <!-- Favicon & Apple Touch Icon -->
+    <link rel="icon" type="image/png" href="/favicon.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+
+    <!-- Open Graph / Link Preview Image (Social Sharing & PWA preview) -->
+    <meta property="og:title" content="Milgos POS & Gestion" />
+    <meta property="og:description" content="Système de Caisse POS & Gestion de Commandes Milgos" />
+    <meta property="og:image" content="/og-image.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:type" content="website" />
+
+    <!-- Twitter Card -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Milgos POS & Gestion" />
+    <meta name="twitter:description" content="Système de Caisse POS & Gestion de Commandes Milgos" />
+    <meta name="twitter:image" content="/og-image.png" />
+  </head>
+  <body class="h-full font-sans antialiased select-none overflow-hidden bg-slate-50 dark:bg-slate-950 text-slate-800 dark:text-slate-100 transition-colors duration-200">
+    <div id="root" class="h-full"></div>
+    <script type="module" src="/src/main.tsx"></script>
+    <script>
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', () => {
+          navigator.serviceWorker.register('/sw.js').then((reg) => {
+            console.log('PWA ServiceWorker registered successfully:', reg.scope);
+          }).catch((err) => {
+            console.log('ServiceWorker registration failed:', err);
+          });
+        });
+      }
+    </script>
+  </body>
+</html>
+

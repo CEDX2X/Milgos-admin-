@@ -1,0 +1,103 @@
+{
+  "entities": {
+    "Serveuse": {
+      "title": "Serveuse",
+      "description": "Membre du personnel ou serveuse",
+      "type": "object",
+      "properties": {
+        "idServeuse": { "type": "string" },
+        "nom": { "type": "string" },
+        "pin": { "type": "string" },
+        "role": { "type": "string" },
+        "actif": { "type": "boolean" },
+        "commandesTraitees": { "type": "number" },
+        "chiffreAffaires": { "type": "number" },
+        "dateCreation": { "type": "string" }
+      },
+      "required": ["idServeuse", "nom", "pin"]
+    },
+    "Article": {
+      "title": "Article",
+      "description": "Produit du catalogue et gestion des stocks",
+      "type": "object",
+      "properties": {
+        "idArticle": { "type": "string" },
+        "nom": { "type": "string" },
+        "categorie": { "type": "string" },
+        "prix": { "type": "number" },
+        "stock": { "type": "number" },
+        "stockInitial": { "type": "number" },
+        "emoji": { "type": "string" },
+        "image": { "type": "string" },
+        "actif": { "type": "boolean" },
+        "description": { "type": "string" }
+      },
+      "required": ["idArticle", "nom", "categorie", "prix", "stock"]
+    },
+    "Commande": {
+      "title": "Commande",
+      "description": "Commande passée en salle et traitée en caisse/cuisine",
+      "type": "object",
+      "properties": {
+        "idCommande": { "type": "string" },
+        "idServeuse": { "type": "string" },
+        "nomServeuse": { "type": "string" },
+        "table": { "type": "string" },
+        "articles": { "type": "array" },
+        "montantTotal": { "type": "number" },
+        "statut": { "type": "string" },
+        "modePaiement": { "type": "string" },
+        "notesServeuse": { "type": "string" },
+        "dateCreation": { "type": "string" },
+        "dateMiseAJour": { "type": "string" }
+      },
+      "required": ["idCommande", "idServeuse", "nomServeuse", "table", "articles", "montantTotal"]
+    },
+    "Table": {
+      "title": "Table",
+      "description": "Table du restaurant ou bar",
+      "type": "object",
+      "properties": {
+        "idTable": { "type": "string" },
+        "nom": { "type": "string" },
+        "dateCreation": { "type": "string" }
+      },
+      "required": ["idTable", "nom"]
+    },
+    "Categorie": {
+      "title": "Categorie",
+      "description": "Catégorie d'articles du restaurant ou bar",
+      "type": "object",
+      "properties": {
+        "idCategorie": { "type": "string" },
+        "nom": { "type": "string" },
+        "emoji": { "type": "string" },
+        "couleur": { "type": "string" },
+        "dateCreation": { "type": "string" }
+      },
+      "required": ["idCategorie", "nom"]
+    }
+  },
+  "firestore": {
+    "/serveuses/{serveuseId}": {
+      "schema": "Serveuse",
+      "description": "Collection des membres du personnel et serveuses"
+    },
+    "/articles/{articleId}": {
+      "schema": "Article",
+      "description": "Collection des articles et boissons du catalogue"
+    },
+    "/commandes/{commandeId}": {
+      "schema": "Commande",
+      "description": "Collection des commandes client"
+    },
+    "/tables/{tableId}": {
+      "schema": "Table",
+      "description": "Collection des tables configurées"
+    },
+    "/categories/{categorieId}": {
+      "schema": "Categorie",
+      "description": "Collection des catégories d'articles configurées"
+    }
+  }
+}

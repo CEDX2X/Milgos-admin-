@@ -1,0 +1,6 @@
+{
+  "name": "Milgos",
+  "description": "Application Web Progressive de Caisse POS Milgos destinée à la prise de commandes, suivi en temps réel, gestion du stock et catalogue d'articles.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
