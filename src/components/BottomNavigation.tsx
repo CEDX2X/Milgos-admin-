@@ -1,12 +1,15 @@
 import React from 'react';
-import { VueActive, RoleServeuse } from '../types';
-import { ShoppingBag, ChefHat, Package, Users, BarChart3, Settings } from 'lucide-react';
+import { VueActive, RoleServeuse, Serveuse } from '../types';
+import { ShoppingBag, ChefHat, Package, Users, BarChart3, Wine, CircleDollarSign, UtensilsCrossed } from 'lucide-react';
+import { hasPermissionForVue } from '../utils/permissions';
 
 interface BottomNavigationProps {
   userRole: RoleServeuse;
+  currentServeuse?: Serveuse | null;
   activeVue: VueActive;
   onChangeVue: (vue: VueActive) => void;
   activeOrdersCount?: number;
+  unpaidOrdersCount?: number;
 }
 
 interface NavTabItem {
@@ -20,24 +23,34 @@ interface NavTabItem {
 
 export const BottomNavigation: React.FC<BottomNavigationProps> = ({
   userRole,
+  currentServeuse,
   activeVue,
   onChangeVue,
-  activeOrdersCount = 0
+  activeOrdersCount = 0,
+  unpaidOrdersCount = 0
 }) => {
   const tabs: NavTabItem[] = [
     {
+      id: 'caisse',
+      label: 'Caisse & Encaissement',
+      shortLabel: 'Caisse',
+      icon: CircleDollarSign,
+      roles: ['admin', 'caissier'],
+      badge: unpaidOrdersCount > 0 ? unpaidOrdersCount : undefined
+    },
+    {
       id: 'commande',
-      label: 'Commandes',
-      shortLabel: 'Commandes',
+      label: 'Prise de Commande',
+      shortLabel: 'Commander',
       icon: ShoppingBag,
       roles: ['admin', 'serveuse']
     },
     {
       id: 'suivi',
-      label: 'Cuisine',
-      shortLabel: 'Cuisine',
-      icon: ChefHat,
-      roles: ['admin', 'serveuse', 'cuisine'],
+      label: userRole === 'barman' ? 'Bar & Boissons' : userRole === 'cuisine' ? 'Cuisine' : userRole === 'serveuse' ? 'Service en Table' : userRole === 'caissier' ? 'Suivi Commandes' : 'Cuisine & Bar',
+      shortLabel: userRole === 'barman' ? 'Bar' : userRole === 'cuisine' ? 'Cuisine' : userRole === 'serveuse' ? 'Service' : userRole === 'caissier' ? 'Suivi' : 'Cuisine',
+      icon: userRole === 'barman' ? Wine : userRole === 'serveuse' ? UtensilsCrossed : ChefHat,
+      roles: ['admin', 'serveuse', 'cuisine', 'barman', 'caissier'],
       badge: activeOrdersCount > 0 ? activeOrdersCount : undefined
     },
     {
@@ -60,23 +73,16 @@ export const BottomNavigation: React.FC<BottomNavigationProps> = ({
       shortLabel: 'Ventes',
       icon: BarChart3,
       roles: ['admin']
-    },
-    {
-      id: 'parametres',
-      label: 'Paramètres',
-      shortLabel: 'Settings',
-      icon: Settings,
-      roles: ['admin']
     }
   ];
 
-  // Filter tabs allowed for current user role
-  const visibleTabs = tabs.filter(tab => tab.roles.includes(userRole));
+  // Filter tabs allowed for current user based on custom permissions or role
+  const visibleTabs = tabs.filter(tab => hasPermissionForVue(currentServeuse || { role: userRole } as Serveuse, tab.id));
 
   return (
     <nav 
       aria-label="Navigation principale"
-      className="fixed bottom-0 left-0 right-0 z-40 bg-white/95 dark:bg-slate-900/95 backdrop-blur-2xl border-t border-red-100 dark:border-slate-800 shadow-[0_-4px_20px_-2px_rgba(220,38,38,0.08)] px-1 sm:px-4 pt-1.5 pb-[calc(0.5rem+env(safe-area-inset-bottom))] flex items-center justify-around select-none"
+      className="lg:hidden fixed bottom-0 left-0 right-0 z-40 bg-white/95 dark:bg-slate-900/95 backdrop-blur-2xl border-t border-red-100 dark:border-slate-800 shadow-[0_-4px_20px_-2px_rgba(220,38,38,0.08)] px-1 sm:px-4 pt-1.5 pb-[calc(0.5rem+env(safe-area-inset-bottom))] flex items-center justify-around select-none"
     >
       <div className="max-w-5xl mx-auto w-full flex items-center justify-around gap-0.5 sm:gap-2">
         {visibleTabs.map((tab) => {

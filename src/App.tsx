@@ -10,20 +10,43 @@ import { CatalogManagerView } from './components/CatalogManagerView';
 import { WaitstaffManagerView } from './components/WaitstaffManagerView';
 import { SalesHistoryView } from './components/SalesHistoryView';
 import { SettingsView } from './components/SettingsView';
+import { CashierRegisterView } from './components/CashierRegisterView';
 import { ToastNotification, ToastMessage } from './components/ToastNotification';
+import { OfflineSyncBanner } from './components/OfflineSyncBanner';
 import { getCurrency } from './utils/format';
-import { sendOrderPaidNotification, initWebPushOnBoot } from './utils/notifications';
+import { sendOrderPaidNotification, sendOrderStatusNotification, initWebPushOnBoot } from './utils/notifications';
+import { filterOrderForRole } from './utils/orderCategory';
+import { syncDeviceRegistration } from './utils/device';
+import { hasPermissionForVue, getDefaultVueForUser } from './utils/permissions';
 
 export default function App() {
-  const [activeVue, setActiveVue] = useState<VueActive>('commande');
+  const [currentServeuse, setCurrentServeuse] = useState<Serveuse | null>(() => {
+    try {
+      const saved = localStorage.getItem('orderease_session_user');
+      return saved ? JSON.parse(saved) : null;
+    } catch {
+      return null;
+    }
+  });
+
+  const [activeVue, setActiveVue] = useState<VueActive>(() => {
+    try {
+      const saved = localStorage.getItem('orderease_session_user');
+      const user = saved ? JSON.parse(saved) : null;
+      return getDefaultVueForUser(user);
+    } catch {
+      return 'commande';
+    }
+  });
   const [articles, setArticles] = useState<Article[]>([]);
   const [categories, setCategories] = useState<Categorie[]>([]);
   const [serveuses, setServeuses] = useState<Serveuse[]>([]);
   const [commandes, setCommandes] = useState<Commande[]>([]);
   const [stats, setStats] = useState<StatistiquesVentes | null>(null);
 
-  // Track paid order IDs to notify on background sync
+  // Track order statuses to notify in real-time across devices
   const knownPaidOrdersRef = React.useRef<Set<string>>(new Set());
+  const previousOrderStatusesRef = React.useRef<Map<string, StatutCommande>>(new Map());
   const isInitialLoadRef = React.useRef<boolean>(true);
 
   // Toast System
@@ -44,15 +67,6 @@ export default function App() {
   const removeToast = (id: string) => {
     setToasts(prev => prev.filter(t => t.id !== id));
   };
-
-  const [currentServeuse, setCurrentServeuse] = useState<Serveuse | null>(() => {
-    try {
-      const saved = localStorage.getItem('orderease_session_user');
-      return saved ? JSON.parse(saved) : null;
-    } catch {
-      return null;
-    }
-  });
 
   const [isOnline, setIsOnline] = useState<boolean>(navigator.onLine);
   const [dbInfo, setDbInfo] = useState<{ type: string; connected: boolean; uri?: string; counts?: any }>({
@@ -78,9 +92,10 @@ export default function App() {
       setCommandes(cmdData);
       setStats(statsData);
 
-      // Initialize paid orders cache on first load so we don't alert on past historical orders
+      // Initialize order statuses cache on first load so we don't alert on past historical orders
       if (isInitialLoadRef.current && cmdData) {
         cmdData.forEach(c => {
+          previousOrderStatusesRef.current.set(c.idCommande, c.statut);
           if (c.statut === 'Payée') {
             knownPaidOrdersRef.current.add(c.idCommande);
           }
@@ -112,7 +127,13 @@ export default function App() {
 
   useEffect(() => {
     loadAllData();
-    initWebPushOnBoot();
+    let initialUser: Serveuse | null = null;
+    try {
+      const saved = localStorage.getItem('orderease_session_user');
+      if (saved) initialUser = JSON.parse(saved);
+    } catch {}
+    initWebPushOnBoot(initialUser);
+    syncDeviceRegistration(initialUser).catch(() => {});
 
     const handleOnline = () => setIsOnline(true);
     const handleOffline = () => setIsOnline(false);
@@ -120,33 +141,62 @@ export default function App() {
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
 
-    // Periodic live sync every 10s for kitchen & order status board
+    // Periodic live sync every 5s for kitchen, bar & waitress real-time notifications
     const interval = setInterval(() => {
       posApi.getCommandes().then((freshCmds) => {
         if (freshCmds && Array.isArray(freshCmds)) {
-          // Check for newly paid orders coming from other POS terminals
+          // Check for status changes across devices
           freshCmds.forEach((c) => {
-            if (c.statut === 'Payée') {
-              if (!knownPaidOrdersRef.current.has(c.idCommande)) {
+            const previousStatut = previousOrderStatusesRef.current.get(c.idCommande);
+
+            if (!isInitialLoadRef.current && previousStatut && previousStatut !== c.statut) {
+              // Status changed!
+              if (c.statut === 'En cuisine') {
+                sendOrderStatusNotification({
+                  idCommande: c.idCommande,
+                  table: c.table,
+                  statut: 'En cuisine',
+                  nomServeuse: c.nomServeuse
+                });
+                addToast('success', '👨‍🍳 Commande en préparation', `Table ${c.table} #${c.idCommande} prise en charge par la cuisine/bar.`);
+              } else if (c.statut === 'Prête') {
+                sendOrderStatusNotification({
+                  idCommande: c.idCommande,
+                  table: c.table,
+                  statut: 'Prête',
+                  nomServeuse: c.nomServeuse
+                });
+                addToast('success', '🔔 Commande PRÊTE !', `Table ${c.table} #${c.idCommande} est prête à être servie !`, 7000);
+              } else if (c.statut === 'Servie') {
+                sendOrderStatusNotification({
+                  idCommande: c.idCommande,
+                  table: c.table,
+                  statut: 'Servie',
+                  nomServeuse: c.nomServeuse
+                });
+                addToast('success', '✅ Commande Servie', `Table ${c.table} #${c.idCommande} a été servie aux clients.`);
+              } else if (c.statut === 'Payée' && !knownPaidOrdersRef.current.has(c.idCommande)) {
                 knownPaidOrdersRef.current.add(c.idCommande);
-                if (!isInitialLoadRef.current) {
-                  sendOrderPaidNotification({
-                    idCommande: c.idCommande,
-                    table: c.table,
-                    total: c.montantTotal,
-                    modePaiement: c.modePaiement,
-                    nomServeuse: c.nomServeuse,
-                    currencySymbol: getCurrency()
-                  });
-                }
+                sendOrderPaidNotification({
+                  idCommande: c.idCommande,
+                  table: c.table,
+                  total: c.montantTotal,
+                  modePaiement: c.modePaiement,
+                  nomServeuse: c.nomServeuse,
+                  currencySymbol: getCurrency()
+                });
+                addToast('success', '💰 Commande Payée', `Table ${c.table} #${c.idCommande} réglée avec succès.`);
               }
             }
+
+            // Update cache
+            previousOrderStatusesRef.current.set(c.idCommande, c.statut);
           });
           setCommandes(freshCmds);
         }
       });
       posApi.getArticles().then(setArticles);
-    }, 10000);
+    }, 5000);
 
     return () => {
       window.removeEventListener('online', handleOnline);
@@ -158,17 +208,16 @@ export default function App() {
   const handleLoginSuccess = (user: Serveuse) => {
     setCurrentServeuse(user);
     localStorage.setItem('orderease_session_user', JSON.stringify(user));
+    syncDeviceRegistration(user).catch(() => {});
+    initWebPushOnBoot(user);
     addToast('success', 'Connexion réussie', `Bienvenue ${user.nom} (${user.role})`);
-    if (user.role === 'cuisine') {
-      setActiveVue('suivi');
-    } else {
-      setActiveVue('commande');
-    }
+    setActiveVue(getDefaultVueForUser(user));
   };
 
   const handleLogout = () => {
     setCurrentServeuse(null);
     localStorage.removeItem('orderease_session_user');
+    syncDeviceRegistration(null).catch(() => {});
     addToast('success', 'Déconnexion effectuée');
   };
 
@@ -213,23 +262,63 @@ export default function App() {
     }
   };
 
-  const handleUpdateStatut = async (idCommande: string, statut: StatutCommande, modePaiement?: ModePaiement) => {
+  const handleUpdateStatut = async (
+    idCommande: string, 
+    statut: StatutCommande, 
+    modePaiement?: ModePaiement,
+    paymentDetails?: {
+      idCaissier?: string;
+      nomCaissier?: string;
+      remise?: any;
+      montantFinal?: number;
+      montantRecu?: number;
+      monnaieRendue?: number;
+      datePaiement?: string;
+    }
+  ) => {
     const loaderId = addToast('loading', 'Mise à jour du statut...', `Commande ${idCommande} ➔ ${statut}`);
     try {
-      await posApi.updateStatutCommande(idCommande, statut, modePaiement);
+      await posApi.updateStatutCommande(idCommande, statut, modePaiement, paymentDetails);
       removeToast(loaderId);
       addToast('success', 'Statut mis à jour !', `Commande #${idCommande} passée à '${statut}' en base de données.`);
 
-      // Trigger payment notification if marked as Payée
-      if (statut === 'Payée') {
+      // Trigger real-time notifications based on new status
+      const existingCmd = commandes.find(c => c.idCommande === idCommande);
+      const targetTable = existingCmd?.table || 'Table';
+      const orderServeuse = existingCmd?.nomServeuse || currentServeuse?.nom;
+
+      if (statut === 'En cuisine') {
+        sendOrderStatusNotification({
+          idCommande,
+          table: targetTable,
+          statut: 'En cuisine',
+          nomServeuse: orderServeuse,
+          department: currentServeuse?.role === 'barman' ? 'bar' : 'cuisine'
+        });
+      } else if (statut === 'Prête') {
+        sendOrderStatusNotification({
+          idCommande,
+          table: targetTable,
+          statut: 'Prête',
+          nomServeuse: orderServeuse,
+          department: currentServeuse?.role === 'barman' ? 'bar' : 'cuisine'
+        });
+      } else if (statut === 'Servie') {
+        sendOrderStatusNotification({
+          idCommande,
+          table: targetTable,
+          statut: 'Servie',
+          nomServeuse: orderServeuse,
+          department: currentServeuse?.role === 'barman' ? 'bar' : 'cuisine'
+        });
+      } else if (statut === 'Payée') {
         knownPaidOrdersRef.current.add(idCommande);
-        const existingCmd = commandes.find(c => c.idCommande === idCommande);
         sendOrderPaidNotification({
           idCommande,
-          table: existingCmd?.table || 'Caisse',
-          total: existingCmd?.montantTotal || 0,
+          table: targetTable,
+          total: paymentDetails?.montantFinal ?? existingCmd?.montantTotal ?? 0,
           modePaiement: modePaiement || existingCmd?.modePaiement || 'Espèces',
-          nomServeuse: existingCmd?.nomServeuse || currentServeuse?.nom,
+          nomServeuse: orderServeuse,
           currencySymbol: getCurrency()
         });
       }
@@ -238,6 +327,45 @@ export default function App() {
     } catch (err: any) {
       removeToast(loaderId);
       addToast('error', 'Échec de mise à jour du statut', err.message || 'Erreur lors de la modification en base de données.');
+    }
+  };
+
+  const handleBatchUpdateStatut = async (
+    idCommandes: string[],
+    paymentData: {
+      table?: string;
+      modePaiement: ModePaiement;
+      idCaissier?: string;
+      nomCaissier?: string;
+      remise?: any;
+      montantFinal?: number;
+      montantRecu?: number;
+      monnaieRendue?: number;
+      datePaiement?: string;
+    }
+  ) => {
+    const loaderId = addToast('loading', 'Encaissement de la table...', `Règlement de ${idCommandes.length} commande(s) en cours...`);
+    try {
+      await posApi.batchPayTableCommandes(idCommandes, paymentData);
+      removeToast(loaderId);
+      addToast('success', 'Table encaissée avec succès !', `La table ${paymentData.table || ''} a été entièrement soldée (${(paymentData.montantFinal ?? 0).toLocaleString()} ${getCurrency()}).`);
+
+      idCommandes.forEach(id => knownPaidOrdersRef.current.add(id));
+
+      sendOrderPaidNotification({
+        idCommande: idCommandes.join(', '),
+        table: paymentData.table || 'Table',
+        total: paymentData.montantFinal ?? 0,
+        modePaiement: paymentData.modePaiement,
+        nomServeuse: paymentData.nomCaissier,
+        currencySymbol: getCurrency()
+      });
+
+      await loadAllData();
+    } catch (err: any) {
+      removeToast(loaderId);
+      addToast('error', 'Échec de l\'encaissement groupé', err.message || 'Erreur lors du règlement de la table.');
+      throw err;
     }
   };
 
@@ -375,6 +503,15 @@ export default function App() {
     return () => window.removeEventListener('currency_changed', handleCurrencyChange);
   }, []);
 
+  // Listen to background sync completions and auto-refresh local state
+  useEffect(() => {
+    const handleSyncComplete = () => {
+      loadAllData();
+    };
+    window.addEventListener('orderease_sync_complete', handleSyncComplete);
+    return () => window.removeEventListener('orderease_sync_complete', handleSyncComplete);
+  }, []);
+
   // If no active session, show Login Page as default landing page
   if (!currentServeuse) {
     return (
@@ -385,12 +522,20 @@ export default function App() {
     );
   }
 
-  const activeKitchenOrdersCount = commandes.filter(c => c.statut !== 'Payée' && c.statut !== 'Annulée').length;
+  const activeKitchenOrdersCount = commandes.filter(c => {
+    if (c.statut === 'Payée' || c.statut === 'Annulée') return false;
+    if (currentServeuse.role === 'barman' || currentServeuse.role === 'cuisine') {
+      return filterOrderForRole(c, currentServeuse.role, articles).hasItemsForRole;
+    }
+    return true;
+  }).length;
+
+  const unpaidOrdersCount = commandes.filter(c => c.statut !== 'Payée' && c.statut !== 'Annulée').length;
 
   return (
     <div className="h-[100dvh] min-h-[100dvh] w-full flex flex-col bg-slate-50 dark:bg-slate-950 text-slate-800 dark:text-slate-100 font-sans overflow-hidden transition-colors duration-200">
       
-      {/* Tablet Header Bar */}
+      {/* Header Bar with Desktop Navigation */}
       <Header
         currentServeuse={currentServeuse}
         onLogout={handleLogout}
@@ -400,29 +545,49 @@ export default function App() {
         dbInfo={dbInfo}
         onRefreshData={loadAllData}
         currentCurrency={currency}
+        userRole={currentServeuse.role}
+        activeOrdersCount={activeKitchenOrdersCount}
+        unpaidOrdersCount={unpaidOrdersCount}
       />
 
-      {/* Main Content Body */}
-      <main className="flex-1 min-h-0 w-full overflow-y-auto touch-scroll-y relative pb-[calc(4.5rem+env(safe-area-inset-bottom))] sm:pb-24">
-        {activeVue === 'commande' && (
+      {/* Offline Sync Banner */}
+      <OfflineSyncBanner onDataRefreshed={loadAllData} />
+
+      {/* Main Content Body (Adaptive padding: generous for mobile, compact for desktop) */}
+      <main className="flex-1 min-h-0 w-full overflow-y-auto touch-scroll-y relative pb-[calc(4.5rem+env(safe-area-inset-bottom))] sm:pb-24 lg:pb-6">
+        {activeVue === 'caisse' && hasPermissionForVue(currentServeuse, 'caisse') && (
+          <CashierRegisterView
+            commandes={commandes}
+            articles={articles}
+            currentServeuse={currentServeuse}
+            onUpdateStatut={handleUpdateStatut}
+            onBatchUpdateStatut={handleBatchUpdateStatut}
+          />
+        )}
+
+        {activeVue === 'commande' && hasPermissionForVue(currentServeuse, 'commande') && (
           <OrderTakingView
             articles={articles}
             categories={categories}
+            commandes={commandes}
             currentServeuse={currentServeuse}
             onValidateOrder={handleValidateOrder}
+            onUpdateStatut={handleUpdateStatut}
+            onNavigateToService={() => setActiveVue('suivi')}
             onOpenLogin={handleLogout}
           />
         )}
 
-        {activeVue === 'suivi' && (
+        {activeVue === 'suivi' && hasPermissionForVue(currentServeuse, 'suivi') && (
           <KitchenDisplayView
             commandes={commandes}
+            articles={articles}
             currentServeuse={currentServeuse}
             onUpdateStatut={handleUpdateStatut}
           />
         )}
 
-        {activeVue === 'catalogue' && (
+        {activeVue === 'catalogue' && hasPermissionForVue(currentServeuse, 'catalogue') && (
           <CatalogManagerView
             articles={articles}
             categories={categories}
@@ -435,7 +600,7 @@ export default function App() {
           />
         )}
 
-        {activeVue === 'serveuses' && currentServeuse?.role === 'admin' && (
+        {activeVue === 'serveuses' && hasPermissionForVue(currentServeuse, 'serveuses') && (
           <WaitstaffManagerView
             serveuses={serveuses}
             currentServeuse={currentServeuse}
@@ -445,14 +610,14 @@ export default function App() {
           />
         )}
 
-        {activeVue === 'historique' && currentServeuse?.role === 'admin' && (
+        {activeVue === 'historique' && hasPermissionForVue(currentServeuse, 'historique') && (
           <SalesHistoryView
             commandes={commandes}
             stats={stats}
           />
         )}
 
-        {activeVue === 'parametres' && currentServeuse?.role === 'admin' && (
+        {activeVue === 'parametres' && hasPermissionForVue(currentServeuse, 'parametres') && (
           <SettingsView
             currentServeuse={currentServeuse}
             dbInfo={dbInfo}
@@ -471,9 +636,11 @@ export default function App() {
       {/* Bottom Navigation Tab Bar */}
       <BottomNavigation
         userRole={currentServeuse.role}
+        currentServeuse={currentServeuse}
         activeVue={activeVue}
         onChangeVue={setActiveVue}
         activeOrdersCount={activeKitchenOrdersCount}
+        unpaidOrdersCount={unpaidOrdersCount}
       />
 
       {/* Global Toast Notification System */}

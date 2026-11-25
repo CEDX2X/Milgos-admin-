@@ -1,8 +1,33 @@
 import React, { useState } from 'react';
 import { Serveuse, RoleServeuse } from '../types';
-import { Users, UserPlus, Trash2, CheckCircle2, Shield, AlertTriangle, X, UserCheck, RefreshCw } from 'lucide-react';
+import { Users, UserPlus, Trash2, CheckCircle2, Shield, AlertTriangle, X, UserCheck, RefreshCw, Eye, EyeOff, CheckSquare, Square } from 'lucide-react';
 import { formatPrice } from '../utils/format';
 import { ConfirmModal } from './ConfirmModal';
+
+const ALL_PERMISSIONS = [
+  { id: 'commande', label: '🛒 Prise de commande & Tables' },
+  { id: 'suivi', label: '🍳 Suivi Cuisine & Bar (Temps réel)' },
+  { id: 'caisse', label: '💶 Caisse & Encaissement' },
+  { id: 'catalogue', label: '📦 Catalogue, Menu & Stocks' },
+  { id: 'serveuses', label: '👥 Gestion du Personnel' },
+  { id: 'historique', label: '📊 Historique des Ventes & Rapports' },
+  { id: 'parametres', label: '⚙️ Paramètres & Configuration' }
+];
+
+const getDefaultPermissionsForRole = (r: RoleServeuse): string[] => {
+  switch (r) {
+    case 'admin':
+      return ['commande', 'suivi', 'caisse', 'catalogue', 'serveuses', 'historique', 'parametres'];
+    case 'caissier':
+      return ['commande', 'caisse', 'historique'];
+    case 'cuisine':
+    case 'barman':
+      return ['suivi'];
+    case 'serveuse':
+    default:
+      return ['commande'];
+  }
+};
 
 interface WaitstaffManagerViewProps {
   serveuses: Serveuse[];
@@ -23,15 +48,47 @@ export const WaitstaffManagerView: React.FC<WaitstaffManagerViewProps> = ({
   const [nom, setNom] = useState('');
   const [pin, setPin] = useState('');
   const [role, setRole] = useState<RoleServeuse>('serveuse');
+  const [permissions, setPermissions] = useState<string[]>(() => getDefaultPermissionsForRole('serveuse'));
   const [isCreating, setIsCreating] = useState(false);
   const [successMessage, setSuccessMessage] = useState('');
+  const [revealedPins, setRevealedPins] = useState<Record<string, boolean>>({});
+
+  const toggleRevealPin = (idServeuse: string) => {
+    setRevealedPins(prev => ({
+      ...prev,
+      [idServeuse]: !prev[idServeuse]
+    }));
+  };
+
+  const handleRoleChange = (newRole: RoleServeuse) => {
+    setRole(newRole);
+    setPermissions(getDefaultPermissionsForRole(newRole));
+  };
+
+  const togglePermission = (permId: string) => {
+    setPermissions(prev =>
+      prev.includes(permId) ? prev.filter(p => p !== permId) : [...prev, permId]
+    );
+  };
 
   // Editing profile state
   const [editingServeuse, setEditingServeuse] = useState<Serveuse | null>(null);
   const [editNom, setEditNom] = useState('');
   const [editPin, setEditPin] = useState('');
   const [editRole, setEditRole] = useState<RoleServeuse>('serveuse');
+  const [editPermissions, setEditPermissions] = useState<string[]>([]);
   const [isSavingEdit, setIsSavingEdit] = useState(false);
+
+  const handleEditRoleChange = (newRole: RoleServeuse) => {
+    setEditRole(newRole);
+    setEditPermissions(getDefaultPermissionsForRole(newRole));
+  };
+
+  const toggleEditPermission = (permId: string) => {
+    setEditPermissions(prev =>
+      prev.includes(permId) ? prev.filter(p => p !== permId) : [...prev, permId]
+    );
+  };
 
   // Delete modal state
   const [serveuseToDelete, setServeuseToDelete] = useState<Serveuse | null>(null);
@@ -55,12 +112,15 @@ export const WaitstaffManagerView: React.FC<WaitstaffManagerViewProps> = ({
         nom: nom.trim(),
         pin: pin.trim(),
         role,
+        permissions,
         actif: true
       });
       setSuccessMessage(`Profil "${nom}" (${role}) créé avec succès en base de données !`);
       setUsername('');
       setNom('');
       setPin('');
+      setPermissions(getDefaultPermissionsForRole('serveuse'));
+      setRole('serveuse');
       setTimeout(() => setSuccessMessage(''), 4000);
     } catch (err: any) {
       console.error('Error creating serveuse:', err);
@@ -75,6 +135,7 @@ export const WaitstaffManagerView: React.FC<WaitstaffManagerViewProps> = ({
     setEditNom(srv.nom);
     setEditPin(srv.pin);
     setEditRole(srv.role);
+    setEditPermissions(srv.permissions || getDefaultPermissionsForRole(srv.role));
     setEditError('');
   };
 
@@ -87,7 +148,8 @@ export const WaitstaffManagerView: React.FC<WaitstaffManagerViewProps> = ({
       await onUpdateServeuse(editingServeuse.idServeuse, {
         nom: editNom.trim(),
         pin: editPin.trim(),
-        role: editRole
+        role: editRole,
+        permissions: editPermissions
       });
       setEditingServeuse(null);
     } catch (err: any) {
@@ -191,18 +253,46 @@ export const WaitstaffManagerView: React.FC<WaitstaffManagerViewProps> = ({
               />
             </div>
 
-            <div>
-              <label className="block text-slate-700 font-bold mb-1">Rôle & Permissions :</label>
-              <select
-                value={role}
-                onChange={(e) => setRole(e.target.value as RoleServeuse)}
-                className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-slate-900 outline-none focus:border-red-500 font-medium"
-              >
-                <option value="serveuse">Serveuse (Prise de commande & Consultation cuisine)</option>
-                <option value="cuisine">Cuisinier (Écran cuisine & Changement des statuts)</option>
-                <option value="admin">Administrateur (Accès complet & Paramètres)</option>
-              </select>
-            </div>
+              <div>
+                <label className="block text-slate-700 font-bold mb-1">Rôle Principal :</label>
+                <select
+                  value={role}
+                  onChange={(e) => handleRoleChange(e.target.value as RoleServeuse)}
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-slate-900 outline-none focus:border-red-500 font-medium"
+                >
+                  <option value="serveuse">Serveuse</option>
+                  <option value="caissier">Caissier</option>
+                  <option value="cuisine">Cuisinier</option>
+                  <option value="barman">Barman</option>
+                  <option value="admin">Administrateur</option>
+                </select>
+              </div>
+
+              <div className="space-y-1.5 pt-1">
+                <label className="block text-slate-700 font-bold">Accès & Permissions (personnalisables) :</label>
+                <div className="bg-slate-50 border border-slate-200 rounded-xl p-2.5 space-y-1.5 max-h-44 overflow-y-auto">
+                  {ALL_PERMISSIONS.map(perm => {
+                    const isChecked = permissions.includes(perm.id);
+                    return (
+                      <div
+                        key={perm.id}
+                        onClick={() => togglePermission(perm.id)}
+                        className={`flex items-center justify-between p-2 rounded-lg cursor-pointer transition-colors border ${
+                          isChecked
+                            ? 'bg-red-50/70 border-red-200 text-slate-900 font-bold'
+                            : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-100 font-medium'
+                        }`}
+                      >
+                        <span className="text-[11px]">{perm.label}</span>
+                        <div className={`w-4 h-4 rounded flex items-center justify-center ${isChecked ? 'bg-red-600 text-white' : 'border border-slate-300 bg-white'}`}>
+                          {isChecked && <CheckCircle2 className="w-3 h-3 text-white" />}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+                <span className="text-[10px] text-slate-400 block">Cochez ou décochez les accès selon vos envies pour ce profil.</span>
+              </div>
 
             <button
               type="submit"
@@ -240,9 +330,13 @@ export const WaitstaffManagerView: React.FC<WaitstaffManagerViewProps> = ({
               const getRoleBadgeUI = (r: string) => {
                 switch (r) {
                   case 'admin':
-                    return <span className="bg-red-100 text-red-800 border border-red-200 uppercase text-[10px] px-2 py-0.5 rounded font-black">Admin</span>;
+                    return <span className="bg-purple-100 text-purple-800 border border-purple-200 uppercase text-[10px] px-2 py-0.5 rounded font-black">Admin</span>;
+                  case 'caissier':
+                    return <span className="bg-emerald-100 text-emerald-800 border border-emerald-200 uppercase text-[10px] px-2 py-0.5 rounded font-black">Caissier</span>;
                   case 'cuisine':
                     return <span className="bg-amber-100 text-amber-800 border border-amber-200 uppercase text-[10px] px-2 py-0.5 rounded font-black">Cuisinier</span>;
+                  case 'barman':
+                    return <span className="bg-cyan-100 text-cyan-800 border border-cyan-200 uppercase text-[10px] px-2 py-0.5 rounded font-black">Barman</span>;
                   default:
                     return <span className="bg-slate-100 text-slate-800 border border-slate-200 uppercase text-[10px] px-2 py-0.5 rounded font-black">Serveuse</span>;
                 }
@@ -318,15 +412,31 @@ export const WaitstaffManagerView: React.FC<WaitstaffManagerViewProps> = ({
                   <div className="bg-slate-50 p-2.5 rounded-xl border border-slate-200 grid grid-cols-3 gap-2 text-center text-xs">
                     <div>
                       <div className="text-[10px] text-slate-400 font-bold">Code PIN</div>
-                      <div className="font-mono text-slate-800 font-bold">{srv.pin}</div>
+                      <div className="font-mono text-slate-800 font-bold flex items-center justify-center space-x-1 mt-0.5">
+                        <span className="tracking-wider">
+                          {revealedPins[srv.idServeuse] ? srv.pin : '••••'}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => toggleRevealPin(srv.idServeuse)}
+                          className="p-1 text-slate-400 hover:text-slate-700 hover:bg-slate-200/60 rounded-md transition-colors"
+                          title={revealedPins[srv.idServeuse] ? "Masquer le code PIN" : "Révéler le code PIN"}
+                        >
+                          {revealedPins[srv.idServeuse] ? (
+                            <EyeOff className="w-3.5 h-3.5 text-slate-600" />
+                          ) : (
+                            <Eye className="w-3.5 h-3.5" />
+                          )}
+                        </button>
+                      </div>
                     </div>
                     <div>
                       <div className="text-[10px] text-slate-400 font-bold">Commandes</div>
-                      <div className="font-extrabold text-slate-900">{srv.commandesTraitees || 0}</div>
+                      <div className="font-extrabold text-slate-900 mt-1">{srv.commandesTraitees || 0}</div>
                     </div>
                     <div>
                       <div className="text-[10px] text-slate-400 font-bold">Total Ventes</div>
-                      <div className="font-extrabold text-red-600 truncate">{formatPrice(srv.chiffreAffaires || 0)}</div>
+                      <div className="font-extrabold text-red-600 truncate mt-1">{formatPrice(srv.chiffreAffaires || 0)}</div>
                     </div>
                   </div>
                 </div>
@@ -376,16 +486,43 @@ export const WaitstaffManagerView: React.FC<WaitstaffManagerViewProps> = ({
               </div>
 
               <div>
-                <label className="block text-slate-700 font-bold mb-1">Rôle :</label>
+                <label className="block text-slate-700 font-bold mb-1">Rôle Principal :</label>
                 <select
                   value={editRole}
-                  onChange={(e) => setEditRole(e.target.value as RoleServeuse)}
+                  onChange={(e) => handleEditRoleChange(e.target.value as RoleServeuse)}
                   className="w-full bg-slate-50 border border-slate-200 rounded-xl px-3 py-2 text-slate-900 font-medium outline-none focus:border-red-500"
                 >
                   <option value="serveuse">Serveuse</option>
+                  <option value="caissier">Caissier</option>
                   <option value="cuisine">Cuisinier</option>
+                  <option value="barman">Barman</option>
                   <option value="admin">Administrateur</option>
                 </select>
+              </div>
+
+              <div className="space-y-1.5 pt-1">
+                <label className="block text-slate-700 font-bold">Accès & Permissions (personnalisables) :</label>
+                <div className="bg-slate-50 border border-slate-200 rounded-xl p-2.5 space-y-1.5 max-h-40 overflow-y-auto">
+                  {ALL_PERMISSIONS.map(perm => {
+                    const isChecked = editPermissions.includes(perm.id);
+                    return (
+                      <div
+                        key={perm.id}
+                        onClick={() => toggleEditPermission(perm.id)}
+                        className={`flex items-center justify-between p-2 rounded-lg cursor-pointer transition-colors border ${
+                          isChecked
+                            ? 'bg-red-50/70 border-red-200 text-slate-900 font-bold'
+                            : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-100 font-medium'
+                        }`}
+                      >
+                        <span className="text-[11px]">{perm.label}</span>
+                        <div className={`w-4 h-4 rounded flex items-center justify-center ${isChecked ? 'bg-red-600 text-white' : 'border border-slate-300 bg-white'}`}>
+                          {isChecked && <CheckCircle2 className="w-3 h-3 text-white" />}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
               </div>
 
               <div className="flex items-center space-x-2 pt-2">

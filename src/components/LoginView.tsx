@@ -1,7 +1,7 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Serveuse } from '../types';
 import { posApi } from '../services/api';
-import { KeyRound, Lock, User, AlertCircle, CheckCircle2, ShieldCheck, ChefHat, ShoppingBag, Info } from 'lucide-react';
+import { KeyRound, Lock, User, AlertCircle, CheckCircle2, ShieldCheck, ChefHat, ShoppingBag, Info, Eye, EyeOff } from 'lucide-react';
 
 interface LoginViewProps {
   serveusesList: Serveuse[];
@@ -16,57 +16,16 @@ export const LoginView: React.FC<LoginViewProps> = ({
     serveusesList.length > 0 ? (serveusesList[0].nom || serveusesList[0].idServeuse) : 'admin1'
   );
   const [pinInput, setPinInput] = useState<string>('');
+  const [showPin, setShowPin] = useState<boolean>(false);
   const [errorMsg, setErrorMsg] = useState<string>('');
   const [loading, setLoading] = useState<boolean>(false);
 
+  const pinInputRef = useRef<HTMLInputElement>(null);
+
+  // Auto-focus PIN input on mount or when username changes
   useEffect(() => {
-    const handlePhysicalKeyDown = (e: KeyboardEvent) => {
-      // Don't intercept if focus is inside text input (e.g. typing username)
-      if (document.activeElement?.tagName === 'INPUT' && (document.activeElement as HTMLInputElement).type === 'text') {
-        return;
-      }
-
-      if (e.key >= '0' && e.key <= '9') {
-        e.preventDefault();
-        handleKeyPress(e.key);
-      } else if (e.key === 'Backspace') {
-        e.preventDefault();
-        handleDelete();
-      } else if (e.key === 'Escape') {
-        e.preventDefault();
-        handleClear();
-      } else if (e.key === 'Enter') {
-        e.preventDefault();
-        if (pinInput.length === 4) {
-          verifyPin(usernameInput, pinInput);
-        }
-      }
-    };
-
-    window.addEventListener('keydown', handlePhysicalKeyDown);
-    return () => window.removeEventListener('keydown', handlePhysicalKeyDown);
-  }, [pinInput, usernameInput]);
-
-  const handleKeyPress = (digit: string) => {
-    if (pinInput.length < 4) {
-      const nextPin = pinInput + digit;
-      setPinInput(nextPin);
-      setErrorMsg('');
-      if (nextPin.length === 4) {
-        verifyPin(usernameInput, nextPin);
-      }
-    }
-  };
-
-  const handleDelete = () => {
-    setPinInput(prev => prev.slice(0, -1));
-    setErrorMsg('');
-  };
-
-  const handleClear = () => {
-    setPinInput('');
-    setErrorMsg('');
-  };
+    pinInputRef.current?.focus();
+  }, [usernameInput]);
 
   const verifyPin = async (userToVerify: string, pinToVerify: string) => {
     if (!userToVerify.trim()) {
@@ -88,11 +47,24 @@ export const LoginView: React.FC<LoginViewProps> = ({
       } else {
         setErrorMsg(res.message || "Code PIN incorrect pour ce profil.");
         setPinInput('');
+        pinInputRef.current?.focus();
       }
     } catch (err: any) {
       setErrorMsg("Erreur de connexion au serveur.");
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handlePinChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const rawVal = e.target.value;
+    // Only keep numeric digits and max 4 characters
+    const digitsOnly = rawVal.replace(/\D/g, '').slice(0, 4);
+    setPinInput(digitsOnly);
+    setErrorMsg('');
+
+    if (digitsOnly.length === 4) {
+      verifyPin(usernameInput, digitsOnly);
     }
   };
 
@@ -104,207 +76,198 @@ export const LoginView: React.FC<LoginViewProps> = ({
   const getRoleBadge = (role: string) => {
     switch (role) {
       case 'admin':
-        return <span className="bg-purple-100 text-purple-700 text-[10px] font-black uppercase px-2 py-0.5 rounded-full border border-purple-200">Admin</span>;
+        return <span className="bg-purple-100 dark:bg-purple-950/60 text-purple-700 dark:text-purple-300 text-[10px] font-black uppercase px-2 py-0.5 rounded-full border border-purple-200 dark:border-purple-800">Admin</span>;
+      case 'caissier':
+        return <span className="bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300 text-[10px] font-black uppercase px-2 py-0.5 rounded-full border border-emerald-200 dark:border-emerald-800">Caisse</span>;
       case 'cuisine':
-        return <span className="bg-amber-100 text-amber-700 text-[10px] font-black uppercase px-2 py-0.5 rounded-full border border-amber-200">Cuisine</span>;
+        return <span className="bg-amber-100 dark:bg-amber-950/60 text-amber-700 dark:text-amber-300 text-[10px] font-black uppercase px-2 py-0.5 rounded-full border border-amber-200 dark:border-amber-800">Cuisine</span>;
+      case 'barman':
+        return <span className="bg-cyan-100 dark:bg-cyan-950/60 text-cyan-700 dark:text-cyan-300 text-[10px] font-black uppercase px-2 py-0.5 rounded-full border border-cyan-200 dark:border-cyan-800">Barman</span>;
       default:
-        return <span className="bg-red-100 text-red-700 text-[10px] font-black uppercase px-2 py-0.5 rounded-full border border-red-200">Serveuse</span>;
+        return <span className="bg-red-100 dark:bg-red-950/60 text-red-700 dark:text-red-300 text-[10px] font-black uppercase px-2 py-0.5 rounded-full border border-red-200 dark:border-red-800">Serveuse</span>;
     }
   };
 
   return (
-    <div className="h-[100dvh] w-full bg-slate-900 text-slate-100 flex flex-col items-center justify-start sm:justify-center p-3 sm:p-6 lg:p-10 relative overflow-y-auto touch-scroll-y">
+    <div className="min-h-[100dvh] w-full bg-slate-900 text-slate-100 flex flex-col items-center justify-center p-4 sm:p-6 lg:p-10 relative overflow-y-auto">
       {/* Subtle background glow */}
-      <div className="absolute top-1/4 left-1/2 -translate-x-1/2 -translate-y-1/2 w-96 h-96 bg-red-600/20 rounded-full blur-3xl pointer-events-none"></div>
+      <div className="absolute top-1/3 left-1/2 -translate-x-1/2 -translate-y-1/2 w-96 h-96 bg-red-600/20 rounded-full blur-3xl pointer-events-none"></div>
 
-      <div className="bg-white text-slate-900 border border-slate-200 rounded-2xl sm:rounded-3xl max-w-md md:max-w-3xl lg:max-w-4xl w-full p-4 sm:p-8 shadow-2xl relative z-10 my-0 sm:my-auto animate-in fade-in zoom-in-95 duration-200 shrink-0">
+      <div className="bg-white dark:bg-slate-900 text-slate-900 dark:text-slate-100 border border-slate-200 dark:border-slate-800 rounded-3xl max-w-md md:max-w-2xl w-full p-6 sm:p-8 shadow-2xl relative z-10 my-auto animate-in fade-in zoom-in-95 duration-200 shrink-0">
         
-        <form onSubmit={handleSubmit} className="grid grid-cols-1 md:grid-cols-12 gap-6 lg:gap-8 items-start">
+        {/* App Brand Header */}
+        <div className="flex items-center space-x-3.5 mb-6 border-b border-slate-100 dark:border-slate-800 pb-5">
+          <img 
+            src="/logo.png" 
+            alt="Milgos Logo" 
+            referrerPolicy="no-referrer"
+            onError={(e) => { 
+              const img = e.currentTarget as HTMLImageElement;
+              if (img.src.includes('/logo.png')) {
+                img.src = 'https://lh3.googleusercontent.com/d/1lsjEbs-loMm1NyLaLSeZbCxcudmxpqPG';
+              }
+            }}
+            className="w-14 h-14 sm:w-16 sm:h-16 rounded-full bg-white border-2 border-red-100 shadow-lg object-contain shrink-0 p-0.5 ring-2 ring-red-500/20" 
+          />
+          <div>
+            <h1 className="text-2xl sm:text-3xl font-black text-slate-900 dark:text-white tracking-tight leading-none">MILGO'S</h1>
+            <p className="text-xs sm:text-sm font-bold text-red-600 dark:text-red-400 tracking-wider uppercase mt-1">FIRED UP CHICKEN • POS</p>
+          </div>
+        </div>
+
+        <form onSubmit={handleSubmit} className="space-y-6">
           
-          {/* Left Column (Desktop): Brand & Profile Selection */}
-          <div className="md:col-span-5 lg:col-span-5 space-y-4 sm:space-y-5 flex flex-col justify-between h-full border-b md:border-b-0 md:border-r border-slate-100 pb-5 md:pb-0 md:pr-6 lg:pr-8">
-            
+          {/* Profile Selection */}
+          {serveusesList.length > 0 ? (
+            <div className="space-y-2">
+              <label className="block text-xs font-extrabold text-slate-700 dark:text-slate-300 uppercase tracking-wider">
+                1. Sélectionner votre profil :
+              </label>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-48 overflow-y-auto p-1.5 bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700/80 rounded-2xl">
+                {serveusesList.map((usr) => {
+                  const isSelected = usernameInput.toLowerCase() === usr.idServeuse.toLowerCase() || usernameInput.toLowerCase() === usr.nom.toLowerCase();
+                  return (
+                    <button
+                      key={usr.idServeuse}
+                      type="button"
+                      onClick={() => {
+                        setUsernameInput(usr.nom || usr.idServeuse);
+                        setPinInput('');
+                        setErrorMsg('');
+                        pinInputRef.current?.focus();
+                      }}
+                      className={`w-full px-3 py-2.5 rounded-xl text-xs font-bold transition-all flex items-center justify-between text-left touch-manipulation active:scale-98 ${
+                        isSelected
+                          ? 'bg-red-600 text-white shadow-md shadow-red-600/20 ring-2 ring-red-300 dark:ring-red-900'
+                          : 'bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-slate-700/60'
+                      }`}
+                    >
+                      <div className="flex items-center space-x-2.5 truncate pr-2">
+                        <div className={`w-2 h-2 rounded-full ${isSelected ? 'bg-white' : 'bg-red-500'}`} />
+                        <span className="truncate font-extrabold">{usr.nom}</span>
+                      </div>
+                      <div className="shrink-0">
+                        {getRoleBadge(usr.role)}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          ) : (
             <div>
-              {/* App Brand Header */}
-              <div className="flex items-center space-x-3.5 mb-5 sm:mb-6">
-                <img 
-                  src="/logo.svg" 
-                  alt="Milgos Logo" 
-                  onError={(e) => { (e.currentTarget as HTMLImageElement).src = '/logo.png'; }}
-                  className="w-14 h-14 sm:w-16 sm:h-16 rounded-full bg-white border-2 border-red-100 shadow-lg object-contain shrink-0 p-0.5 ring-2 ring-red-500/20" 
+              <label className="block text-xs font-bold text-slate-700 dark:text-slate-300 mb-1.5">
+                Identifiant utilisateur :
+              </label>
+              <div className="relative">
+                <User className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                <input
+                  type="text"
+                  required
+                  placeholder="ex: admin1"
+                  value={usernameInput}
+                  onChange={(e) => {
+                    setUsernameInput(e.target.value);
+                    setErrorMsg('');
+                  }}
+                  className="w-full bg-slate-50 dark:bg-slate-800 border border-slate-200 dark:border-slate-700 focus:border-red-500 rounded-xl pl-10 pr-3.5 py-2.5 text-sm font-extrabold text-slate-900 dark:text-white placeholder-slate-400 outline-none transition-all"
                 />
-                <div>
-                  <h1 className="text-2xl sm:text-3xl font-black text-slate-900 tracking-tight leading-none">MILGO'S</h1>
-                  <p className="text-xs sm:text-sm font-bold text-red-600 tracking-wider uppercase mt-1">FIRED UP CHICKEN • POS</p>
-                </div>
-              </div>
-
-              {/* Profile Login Instruction */}
-              <div className="bg-red-50/70 border border-red-100 rounded-xl p-3 mb-4 text-[11px] sm:text-xs text-red-950 flex items-start space-x-2.5">
-                <Info className="w-4 h-4 text-red-600 shrink-0 mt-0.5" />
-                <span>Cliquez sur votre nom ci-dessous ou saisissez votre identifiant pour vous connecter.</span>
-              </div>
-
-              {/* Active Users Selection */}
-              {serveusesList.length > 0 && (
-                <div className="space-y-2">
-                  <label className="block text-[11px] sm:text-xs font-bold text-slate-700">
-                    Sélectionner un profil utilisateur :
-                  </label>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-1 gap-2 max-h-48 sm:max-h-60 overflow-y-auto p-1.5 bg-slate-50 border border-slate-200 rounded-xl sm:rounded-2xl">
-                    {serveusesList.map((usr) => {
-                      const isSelected = usernameInput.toLowerCase() === usr.idServeuse.toLowerCase() || usernameInput.toLowerCase() === usr.nom.toLowerCase();
-                      return (
-                        <button
-                          key={usr.idServeuse}
-                          type="button"
-                          onClick={() => {
-                            setUsernameInput(usr.nom || usr.idServeuse);
-                            setPinInput('');
-                            setErrorMsg('');
-                          }}
-                          className={`w-full px-3 py-2 rounded-xl text-xs font-bold transition-all flex items-center justify-between text-left touch-manipulation active:scale-98 ${
-                            isSelected
-                              ? 'bg-red-600 text-white shadow-md shadow-red-600/20 ring-2 ring-red-300'
-                              : 'bg-white border border-slate-200 text-slate-800 hover:bg-slate-100'
-                          }`}
-                        >
-                          <div className="flex items-center space-x-2 truncate pr-2">
-                            <div className={`w-2 h-2 rounded-full ${isSelected ? 'bg-white' : 'bg-red-500'}`} />
-                            <span className="truncate font-extrabold">{usr.nom}</span>
-                          </div>
-                          <div className="shrink-0">
-                            {getRoleBadge(usr.role)}
-                          </div>
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
-
-              {/* Username Input Field */}
-              <div className="mt-4">
-                <label className="block text-[11px] sm:text-xs font-bold text-slate-700 mb-1">
-                  Ou identifiant manuel :
-                </label>
-                <div className="relative">
-                  <User className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-                  <input
-                    type="text"
-                    required
-                    placeholder="ex: admin1"
-                    value={usernameInput}
-                    onChange={(e) => {
-                      setUsernameInput(e.target.value);
-                      setErrorMsg('');
-                    }}
-                    className="w-full bg-slate-50 border border-slate-200 focus:border-red-500 focus:ring-2 focus:ring-red-100 rounded-xl pl-9 pr-3 py-2 text-xs sm:text-sm font-extrabold text-slate-900 placeholder-slate-400 outline-none transition-all"
-                  />
-                </div>
               </div>
             </div>
+          )}
 
-            {/* Desktop Keyboard Helper */}
-            <div className="hidden md:flex items-center space-x-2 text-[11px] text-slate-400 pt-3 border-t border-slate-100">
-              <span className="px-1.5 py-0.5 bg-slate-100 border border-slate-200 rounded font-mono font-bold text-[10px] text-slate-600">Clavier</span>
-              <span>Vous pouvez saisir le PIN directement avec le pavé numérique de l'ordinateur.</span>
-            </div>
-
-          </div>
-
-          {/* Right Column (Desktop): PIN Keypad & Submit */}
-          <div className="md:col-span-7 lg:col-span-7 space-y-3 sm:space-y-4">
-            
-            {/* Active User Summary Header */}
-            <div className="bg-slate-50 border border-slate-200 rounded-xl sm:rounded-2xl p-3 flex items-center justify-between">
-              <div className="flex items-center space-x-2.5">
-                <div className="w-8 h-8 rounded-lg bg-red-100 text-red-700 flex items-center justify-center font-black text-sm">
-                  {usernameInput.charAt(0).toUpperCase() || 'U'}
-                </div>
-                <div>
-                  <div className="text-[10px] text-slate-400 font-bold uppercase tracking-wider">Profil Sélectionné</div>
-                  <div className="text-xs sm:text-sm font-black text-slate-900 truncate max-w-[180px] sm:max-w-xs">{usernameInput || 'Aucun'}</div>
-                </div>
-              </div>
-              <div className="text-xs">
-                <Lock className="w-4 h-4 text-red-600" />
-              </div>
-            </div>
-
-            {/* PIN Display */}
-            <div className="bg-slate-50 border border-slate-200 rounded-xl sm:rounded-2xl p-3 sm:p-4 text-center">
-              <div className="text-[11px] sm:text-xs font-bold text-slate-600 mb-2 flex items-center justify-center space-x-1">
-                <span>Code PIN de sécurité (4 chiffres)</span>
-              </div>
-              <div className="flex justify-center space-x-3 py-1">
-                {[0, 1, 2, 3].map((idx) => (
-                  <div
-                    key={idx}
-                    className={`w-10 h-10 sm:w-12 sm:h-12 rounded-xl border-2 flex items-center justify-center text-xl font-bold transition-all ${
-                      pinInput.length > idx
-                        ? 'bg-red-600 border-red-600 text-white scale-105 shadow-md shadow-red-600/20'
-                        : 'bg-white border-slate-200 text-transparent'
-                    }`}
-                  >
-                    ●
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            {errorMsg && (
-              <div className="p-2.5 sm:p-3 bg-red-50 border border-red-200 text-red-700 rounded-xl text-[11px] sm:text-xs font-bold flex items-center space-x-2 animate-in fade-in">
-                <AlertCircle className="w-4 h-4 shrink-0 text-red-600" />
-                <span>{errorMsg}</span>
-              </div>
-            )}
-
-            {/* Touch & Desktop Keypad */}
-            <div className="grid grid-cols-3 gap-2">
-              {['1', '2', '3', '4', '5', '6', '7', '8', '9'].map((digit) => (
-                <button
-                  key={digit}
-                  type="button"
-                  onClick={() => handleKeyPress(digit)}
-                  className="py-3 sm:py-3.5 min-h-[46px] bg-slate-50 hover:bg-slate-100 active:bg-red-600 active:text-white text-slate-900 font-bold text-base sm:text-xl rounded-xl border border-slate-200 transition-all touch-manipulation shadow-xs flex items-center justify-center"
-                >
-                  {digit}
-                </button>
-              ))}
+          {/* PIN Input Section with Native Keyboard Support */}
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <label className="block text-xs font-extrabold text-slate-700 dark:text-slate-300 uppercase tracking-wider">
+                2. Code PIN de sécurité (4 chiffres) :
+              </label>
               <button
                 type="button"
-                onClick={handleClear}
-                className="py-3 sm:py-3.5 min-h-[46px] bg-slate-50 hover:bg-slate-100 text-amber-700 font-bold text-[11px] sm:text-xs rounded-xl border border-slate-200 transition-all touch-manipulation shadow-xs flex items-center justify-center uppercase tracking-wider"
+                onClick={() => setShowPin(!showPin)}
+                className="text-[11px] font-bold text-slate-500 dark:text-slate-400 hover:text-red-600 dark:hover:text-red-400 flex items-center space-x-1 transition-colors"
               >
-                Effacer
-              </button>
-              <button
-                type="button"
-                onClick={() => handleKeyPress('0')}
-                className="py-3 sm:py-3.5 min-h-[46px] bg-slate-50 hover:bg-slate-100 active:bg-red-600 active:text-white text-slate-900 font-bold text-base sm:text-xl rounded-xl border border-slate-200 transition-all touch-manipulation shadow-xs flex items-center justify-center"
-              >
-                0
-              </button>
-              <button
-                type="button"
-                onClick={handleDelete}
-                className="py-3 sm:py-3.5 min-h-[46px] bg-slate-50 hover:bg-slate-100 text-red-600 font-bold text-[11px] sm:text-xs rounded-xl border border-slate-200 transition-all touch-manipulation shadow-xs flex items-center justify-center uppercase tracking-wider"
-              >
-                ⌫ Retour
+                {showPin ? (
+                  <>
+                    <EyeOff className="w-3.5 h-3.5" />
+                    <span>Masquer</span>
+                  </>
+                ) : (
+                  <>
+                    <Eye className="w-3.5 h-3.5" />
+                    <span>Afficher</span>
+                  </>
+                )}
               </button>
             </div>
 
-            <button
-              type="submit"
-              disabled={loading || pinInput.length < 4}
-              className="w-full py-3.5 bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white font-extrabold text-xs sm:text-sm rounded-xl sm:rounded-2xl shadow-lg shadow-red-600/30 transition-all flex items-center justify-center space-x-2 touch-manipulation active:scale-98 mt-2 min-h-[48px]"
+            {/* Interactive Visual 4-Box PIN Display (tapping it focuses native keyboard input) */}
+            <div 
+              onClick={() => pinInputRef.current?.focus()}
+              className="bg-slate-50 dark:bg-slate-800/50 border border-slate-200 dark:border-slate-700/80 rounded-2xl p-4 sm:p-5 text-center cursor-pointer relative group transition-all hover:border-red-300 dark:hover:border-red-900/60"
             >
-              <ShieldCheck className="w-4 h-4 sm:w-5 sm:h-5" />
-              <span>{loading ? 'Vérification...' : 'Se Connecter à la Caisse'}</span>
-            </button>
+              {/* Invisible native input for capturing mobile/desktop keyboard events */}
+              <input
+                ref={pinInputRef}
+                type={showPin ? "text" : "password"}
+                inputMode="numeric"
+                pattern="[0-9]*"
+                maxLength={4}
+                autoComplete="one-time-code"
+                autoFocus
+                value={pinInput}
+                onChange={handlePinChange}
+                className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-20 text-transparent"
+                aria-label="Code PIN de sécurité"
+              />
 
+              {/* 4 Box Visual Indicator */}
+              <div className="flex justify-center space-x-3.5 py-1 pointer-events-none">
+                {[0, 1, 2, 3].map((idx) => {
+                  const digit = pinInput[idx];
+                  const isFilled = digit !== undefined;
+                  const isCurrent = pinInput.length === idx;
+
+                  return (
+                    <div
+                      key={idx}
+                      className={`w-12 h-14 sm:w-14 sm:h-16 rounded-2xl border-2 flex items-center justify-center text-2xl font-black transition-all ${
+                        isFilled
+                          ? 'bg-red-600 border-red-600 text-white shadow-md shadow-red-600/25 scale-105'
+                          : isCurrent
+                          ? 'bg-white dark:bg-slate-900 border-red-500 ring-4 ring-red-500/20 text-slate-900 dark:text-white'
+                          : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-700 text-slate-400'
+                      }`}
+                    >
+                      {isFilled ? (showPin ? digit : '●') : ''}
+                    </div>
+                  );
+                })}
+              </div>
+
+              <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-3 font-medium flex items-center justify-center space-x-1.5">
+                <KeyRound className="w-3.5 h-3.5 text-red-500 shrink-0" />
+                <span>Touchez ou cliquez pour ouvrir le clavier de votre appareil</span>
+              </p>
+            </div>
           </div>
+
+          {errorMsg && (
+            <div className="p-3 bg-red-50 dark:bg-red-950/50 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-300 rounded-2xl text-xs font-bold flex items-center space-x-2.5 animate-in fade-in">
+              <AlertCircle className="w-4 h-4 shrink-0 text-red-600" />
+              <span>{errorMsg}</span>
+            </div>
+          )}
+
+          {/* Submit Button */}
+          <button
+            type="submit"
+            disabled={loading || pinInput.length < 4}
+            className="w-full py-4 bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white font-black text-sm rounded-2xl shadow-xl shadow-red-600/30 transition-all flex items-center justify-center space-x-2 touch-manipulation active:scale-98 min-h-[52px]"
+          >
+            <ShieldCheck className="w-5 h-5" />
+            <span>{loading ? 'Vérification en cours...' : 'Se Connecter à la Caisse'}</span>
+          </button>
 
         </form>
 
@@ -312,3 +275,4 @@ export const LoginView: React.FC<LoginViewProps> = ({
     </div>
   );
 };
+

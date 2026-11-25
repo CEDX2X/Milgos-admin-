@@ -1,4 +1,4 @@
-export type RoleServeuse = 'serveuse' | 'admin' | 'cuisine';
+export type RoleServeuse = 'serveuse' | 'admin' | 'cuisine' | 'barman' | 'caissier';
 
 export interface Serveuse {
   _id?: string;
@@ -10,6 +10,7 @@ export interface Serveuse {
   commandesTraitees?: number;
   chiffreAffaires?: number;
   dateCreation?: string;
+  permissions?: string[];
 }
 
 export interface Categorie {
@@ -37,8 +38,14 @@ export interface Article {
   description?: string;
 }
 
-export type StatutCommande = 'En attente' | 'En cuisine' | 'Servie' | 'Payée' | 'Annulée';
-export type ModePaiement = 'Espèces' | 'Carte Bancaire' | 'Ticket / Pass' | 'Non payé';
+export type StatutCommande = 'En attente' | 'En cuisine' | 'Prête' | 'Servie' | 'Payée' | 'Annulée';
+export type ModePaiement = 'Espèces' | 'Carte Bancaire' | 'Mobile Money' | 'Ticket / Pass' | 'Non payé';
+
+export interface RemiseCommande {
+  type: 'percent' | 'fixed';
+  valeur: number;
+  montantRemise: number;
+}
 
 export interface ArticleCommande {
   idArticle: string;
@@ -46,6 +53,7 @@ export interface ArticleCommande {
   prixUnitaire: number;
   quantite: number;
   sousTotal: number;
+  categorie?: string;
   notes?: string;
 }
 
@@ -62,6 +70,15 @@ export interface Commande {
   notesServeuse?: string;
   dateCreation: string;
   dateMiseAJour?: string;
+  
+  // Caissier & Encaissement Traceability
+  idCaissier?: string;
+  nomCaissier?: string;
+  remise?: RemiseCommande;
+  montantFinal?: number;
+  montantRecu?: number;
+  monnaieRendue?: number;
+  datePaiement?: string;
 }
 
 export interface StatistiquesVentes {
@@ -75,4 +92,27 @@ export interface StatistiquesVentes {
   topArticles: { idArticle: string; nom: string; quantiteVendue: number; chiffreAffaires: number }[];
 }
 
-export type VueActive = 'commande' | 'suivi' | 'catalogue' | 'serveuses' | 'historique' | 'parametres';
+export type VueActive = 'commande' | 'suivi' | 'caisse' | 'catalogue' | 'serveuses' | 'historique' | 'parametres';
+
+export interface DeviceRegistration {
+  idAppareil: string; // Identifiant unique de l'appareil (ex: "DEV-A84B1C")
+  nomAppareil: string; // Nom convivial (ex: "iPhone 14 Alice", "Tablette Cuisine")
+  idProfil: string; // Identifiant du profil connecté (ex: "SRV-001")
+  nomProfil: string; // Nom de l'utilisateur (ex: "Alice Kouamé")
+  role: RoleServeuse; // Rôle du profil
+  hasPushSubscription: boolean;
+  dateCreation: string;
+  derniereActivite: string;
+  userAgent?: string;
+}
+
+export interface TargetNotificationPayload {
+  targetIdProfil?: string; // Filtrer par ID de profil (ex: "SRV-001")
+  targetIdAppareil?: string; // Filtrer par ID d'appareil (ex: "DEV-A84B1C")
+  targetRole?: RoleServeuse | 'all'; // Filtrer par rôle
+  title: string;
+  body: string;
+  tag?: string;
+  data?: any;
+}
+

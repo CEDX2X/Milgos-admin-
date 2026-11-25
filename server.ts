@@ -16,7 +16,8 @@ import {
   deleteDoc,
   writeBatch,
   limit,
-  query
+  query,
+  where
 } from "firebase/firestore";
 import { createServer as createViteServer } from "vite";
 import { INITIAL_ARTICLES, INITIAL_COMMANDES, INITIAL_SERVEUSES, INITIAL_TABLES, INITIAL_CATEGORIES } from "./src/data/initialData.js";
@@ -132,37 +133,53 @@ async function connectFirebase() {
 async function seedFirestoreIfNeeded() {
   if (!isFirestoreConnected || !firestoreDb) return;
   try {
-    const statusRef = doc(firestoreDb, "system", "status");
-    const statusSnap = await getDoc(statusRef);
+    const qMilgo = query(collection(firestoreDb, "articles"), where("idArticle", "==", "ART-MIL-001"));
+    const milgoSnap = await getDocs(qMilgo);
 
-    if (!statusSnap.exists()) {
-      const q = query(collection(firestoreDb, "articles"), limit(1));
-      const articlesSnap = await getDocs(q);
-      if (articlesSnap.empty) {
-        console.log("🌱 Ingestion initiale des données dans Firebase Firestore...");
-        const batch = writeBatch(firestoreDb);
+    // If Milgo's articles don't exist yet in Firestore, seed or migrate them
+    if (milgoSnap.empty) {
+      console.log("🍗 Ingestion du menu officiel Milgo's dans Firebase Firestore...");
+      const batch = writeBatch(firestoreDb);
 
+      // Clean up old demo articles if any existed
+      const existingArticlesSnap = await getDocs(collection(firestoreDb, "articles"));
+      for (const d of existingArticlesSnap.docs) {
+        if (!d.id.startsWith("ART-MIL-")) {
+          batch.delete(d.ref);
+        }
+      }
+
+      // Add all Milgo's categories
+      for (const cat of INITIAL_CATEGORIES) {
+        batch.set(doc(firestoreDb, "categories", cat.idCategorie), { ...cat, dateCreation: new Date().toISOString() });
+      }
+
+      // Add all Milgo's articles
+      for (const art of INITIAL_ARTICLES) {
+        batch.set(doc(firestoreDb, "articles", art.idArticle), art);
+      }
+
+      // Add initial serveuses if missing
+      const srvSnap = await getDocs(collection(firestoreDb, "serveuses"));
+      if (srvSnap.empty) {
         for (const srv of INITIAL_SERVEUSES) {
           batch.set(doc(firestoreDb, "serveuses", srv.idServeuse), srv);
         }
-        for (const art of INITIAL_ARTICLES) {
-          batch.set(doc(firestoreDb, "articles", art.idArticle), art);
-        }
-        for (const cmd of INITIAL_COMMANDES) {
-          batch.set(doc(firestoreDb, "commandes", cmd.idCommande), cmd);
-        }
+      }
+
+      // Add initial tables if missing
+      const tblSnap = await getDocs(collection(firestoreDb, "tables"));
+      if (tblSnap.empty) {
         for (const tbl of INITIAL_TABLES) {
           batch.set(doc(firestoreDb, "tables", tbl.idTable), { ...tbl, dateCreation: new Date().toISOString() });
         }
-        for (const cat of INITIAL_CATEGORIES) {
-          batch.set(doc(firestoreDb, "categories", cat.idCategorie), { ...cat, dateCreation: new Date().toISOString() });
-        }
-        batch.set(statusRef, { initialized: true, dateCreation: new Date().toISOString() });
-        await batch.commit();
-        console.log("✅ Firebase Firestore initialisé avec succès avec les données par défaut !");
-      } else {
-        await setDoc(statusRef, { initialized: true, dateCreation: new Date().toISOString() });
       }
+
+      const statusRef = doc(firestoreDb, "system", "status");
+      batch.set(statusRef, { initialized: true, milgosMenuSeeded: true, dateCreation: new Date().toISOString() });
+
+      await batch.commit();
+      console.log("✅ Menu officiel Milgo's Fired Up Chicken synchronisé avec succès dans Firestore !");
     }
   } catch (e: any) {
     console.warn("⚠️ Seeding Firestore impossible, utilisation du mode fallback :", e.message);
@@ -176,6 +193,7 @@ let memoryCommandes = [...INITIAL_COMMANDES];
 let memoryTables = [...INITIAL_TABLES];
 let memoryCategories = [...INITIAL_CATEGORIES];
 let memoryPushSubscriptions: any[] = [];
+let memoryDevices: any[] = [];
 
 // -------------------------------------------------------------
 // Web Push VAPID Setup (iOS & Android Background Push)
@@ -187,21 +205,54 @@ let vapidKeys = {
 
 async function setupWebPush() {
   const vapidFilePath = path.join(process.cwd(), "vapid-keys.json");
-  
-  if (fs.existsSync(vapidFilePath)) {
+  let loaded = false;
+
+  // 1. Try to load from Firestore first if connected (ensures keys persist across all server restarts)
+  if (isFirestoreConnected && firestoreDb) {
     try {
-      vapidKeys = JSON.parse(fs.readFileSync(vapidFilePath, "utf-8"));
-    } catch {
-      vapidKeys = webpush.generateVAPIDKeys();
-      fs.writeFileSync(vapidFilePath, JSON.stringify(vapidKeys, null, 2));
+      const vapidSnap = await getDoc(doc(firestoreDb, "system_settings", "vapid_keys"));
+      if (vapidSnap.exists()) {
+        const data = vapidSnap.data();
+        if (data?.publicKey && data?.privateKey) {
+          vapidKeys = { publicKey: data.publicKey, privateKey: data.privateKey };
+          loaded = true;
+          console.log("🔑 Clefs VAPID chargées depuis Firestore.");
+        }
+      }
+    } catch (e: any) {
+      console.warn("⚠️ Impossible de lire les clefs VAPID depuis Firestore:", e.message);
     }
-  } else {
+  }
+
+  // 2. Try to load from local file
+  if (!loaded && fs.existsSync(vapidFilePath)) {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(vapidFilePath, "utf-8"));
+      if (parsed.publicKey && parsed.privateKey) {
+        vapidKeys = parsed;
+        loaded = true;
+        console.log("🔑 Clefs VAPID chargées depuis vapid-keys.json.");
+      }
+    } catch {}
+  }
+
+  // 3. If still not loaded, generate new VAPID keys
+  if (!loaded) {
     vapidKeys = webpush.generateVAPIDKeys();
     try {
       fs.writeFileSync(vapidFilePath, JSON.stringify(vapidKeys, null, 2));
-    } catch (e) {
-      console.warn("⚠️ Could not write vapid-keys.json, keeping in memory.");
-    }
+    } catch {}
+  }
+
+  // 4. Persist to Firestore if connected
+  if (isFirestoreConnected && firestoreDb) {
+    try {
+      await setDoc(doc(firestoreDb, "system_settings", "vapid_keys"), {
+        publicKey: vapidKeys.publicKey,
+        privateKey: vapidKeys.privateKey,
+        dateMiseAJour: new Date().toISOString()
+      }, { merge: true });
+    } catch {}
   }
 
   webpush.setVapidDetails(
@@ -212,7 +263,89 @@ async function setupWebPush() {
   console.log(`🔔 Web Push VAPID initialisé avec succès ! Clef publique: ${vapidKeys.publicKey.substring(0, 15)}...`);
 }
 
-async function savePushSubscription(sub: any) {
+// -------------------------------------------------------------
+// CONNECTED DEVICES & TARGETED NOTIFICATIONS ROUTING BY ID
+// -------------------------------------------------------------
+async function saveDeviceRecord(device: {
+  idAppareil: string;
+  nomAppareil?: string;
+  idProfil?: string;
+  nomProfil?: string;
+  role?: string;
+  subscription?: any;
+  userAgent?: string;
+}) {
+  if (!device.idAppareil) return;
+
+  const now = new Date().toISOString();
+  const existingDevice = (await fetchDevicesList()).find(d => d.idAppareil === device.idAppareil);
+
+  const updatedRecord = {
+    idAppareil: device.idAppareil,
+    nomAppareil: device.nomAppareil || existingDevice?.nomAppareil || "Appareil POS",
+    idProfil: device.idProfil || existingDevice?.idProfil || "GUEST",
+    nomProfil: device.nomProfil || existingDevice?.nomProfil || "Non assigné",
+    role: device.role || existingDevice?.role || "serveuse",
+    subscription: device.subscription !== undefined ? device.subscription : (existingDevice?.subscription || null),
+    hasPushSubscription: Boolean(device.subscription || existingDevice?.subscription),
+    dateCreation: existingDevice?.dateCreation || now,
+    derniereActivite: now,
+    userAgent: device.userAgent || existingDevice?.userAgent || "Navigateur Web"
+  };
+
+  if (isFirestoreConnected && firestoreDb) {
+    try {
+      await setDoc(doc(firestoreDb, "registered_devices", device.idAppareil), updatedRecord, { merge: true });
+    } catch (err: any) {
+      console.warn("⚠️ Error saving device to Firestore:", err.message);
+    }
+  }
+
+  const idx = memoryDevices.findIndex(d => d.idAppareil === device.idAppareil);
+  if (idx !== -1) {
+    memoryDevices[idx] = updatedRecord;
+  } else {
+    memoryDevices.push(updatedRecord);
+  }
+
+  return updatedRecord;
+}
+
+async function fetchDevicesList(): Promise<any[]> {
+  if (isFirestoreConnected && firestoreDb) {
+    try {
+      const snap = await getDocs(collection(firestoreDb, "registered_devices"));
+      if (!snap.empty) {
+        const list = snap.docs.map(d => d.data());
+        // Sort by ID Appareil ascending (DEV-...)
+        return list.sort((a: any, b: any) => (a.idAppareil || "").localeCompare(b.idAppareil || ""));
+      }
+    } catch (err: any) {
+      console.warn("⚠️ Error fetching devices from Firestore:", err.message);
+    }
+  }
+  return [...memoryDevices].sort((a: any, b: any) => (a.idAppareil || "").localeCompare(b.idAppareil || ""));
+}
+
+async function deleteDeviceRecord(idAppareil: string) {
+  if (isFirestoreConnected && firestoreDb) {
+    try {
+      await deleteDoc(doc(firestoreDb, "registered_devices", idAppareil));
+    } catch (err: any) {
+      console.warn("⚠️ Error deleting device from Firestore:", err.message);
+    }
+  }
+  memoryDevices = memoryDevices.filter(d => d.idAppareil !== idAppareil);
+}
+
+async function savePushSubscription(sub: any, meta?: {
+  idAppareil?: string;
+  nomAppareil?: string;
+  idProfil?: string;
+  nomProfil?: string;
+  role?: string;
+  userAgent?: string;
+}) {
   if (!sub || !sub.endpoint) return;
   
   if (isFirestoreConnected && firestoreDb) {
@@ -220,6 +353,10 @@ async function savePushSubscription(sub: any) {
       const docId = Buffer.from(sub.endpoint).toString("hex").substring(0, 100);
       await setDoc(doc(firestoreDb, "push_subscriptions", docId), {
         subscription: sub,
+        idAppareil: meta?.idAppareil || null,
+        idProfil: meta?.idProfil || null,
+        nomProfil: meta?.nomProfil || null,
+        role: meta?.role || null,
         dateCreation: new Date().toISOString()
       });
     } catch (err: any) {
@@ -228,7 +365,26 @@ async function savePushSubscription(sub: any) {
   }
 
   if (!memoryPushSubscriptions.some(s => s.endpoint === sub.endpoint)) {
-    memoryPushSubscriptions.push(sub);
+    memoryPushSubscriptions.push({
+      subscription: sub,
+      idAppareil: meta?.idAppareil,
+      idProfil: meta?.idProfil,
+      nomProfil: meta?.nomProfil,
+      role: meta?.role
+    });
+  }
+
+  // Also bind to registered device if device ID is present
+  if (meta?.idAppareil) {
+    await saveDeviceRecord({
+      idAppareil: meta.idAppareil,
+      nomAppareil: meta.nomAppareil,
+      idProfil: meta.idProfil,
+      nomProfil: meta.nomProfil,
+      role: meta.role,
+      subscription: sub,
+      userAgent: meta.userAgent
+    });
   }
 }
 
@@ -237,7 +393,7 @@ async function fetchPushSubscriptions(): Promise<any[]> {
     try {
       const snap = await getDocs(collection(firestoreDb, "push_subscriptions"));
       if (!snap.empty) {
-        return snap.docs.map(d => d.data().subscription).filter(Boolean);
+        return snap.docs.map(d => d.data());
       }
     } catch (err: any) {
       console.warn("⚠️ Error fetching push subs from Firestore:", err.message);
@@ -246,41 +402,122 @@ async function fetchPushSubscriptions(): Promise<any[]> {
   return memoryPushSubscriptions;
 }
 
-async function sendPushNotificationToAll(payload: { title: string; body: string; data?: any; tag?: string }) {
+/**
+ * Sends targeted Web Push notification filtered by:
+ * - targetIdProfil: ID of specific staff (e.g. "SRV-001")
+ * - targetIdAppareil: ID of specific device (e.g. "DEV-A84B1C")
+ * - targetRole: role filter (e.g. "cuisine", "barman", "caissier", "admin")
+ *
+ * NOTE: Administrators (role: 'admin') receive alerts so managers stay informed.
+ */
+async function sendPushNotificationTargeted(options: {
+  targetIdProfil?: string;
+  targetIdAppareil?: string;
+  targetRole?: string | 'all';
+  title: string;
+  body: string;
+  data?: any;
+  tag?: string;
+}): Promise<{ sent: number; total: number }> {
   try {
-    const subscriptions = await fetchPushSubscriptions();
-    if (subscriptions.length === 0) {
-      console.log("ℹ️ Aucun abonné push enregistré pour le moment.");
-      return;
+    const pushRecords = await fetchPushSubscriptions();
+    if (pushRecords.length === 0) {
+      return { sent: 0, total: 0 };
     }
 
-    console.log(`📡 Envoi de la notification Web Push à ${subscriptions.length} appareil(s)...`);
-    const payloadStr = JSON.stringify(payload);
+    const { targetIdProfil, targetIdAppareil, targetRole, title, body, data, tag } = options;
 
-    const promises = subscriptions.map(async (sub) => {
+    // Filter recipients by ID Appareil, ID Profil, or Role
+    const matchingRecords = pushRecords.filter((rec: any) => {
+      const sub = rec.subscription || rec;
+      if (!sub || !sub.endpoint) return false;
+
+      // 1. Direct device ID targeting
+      if (targetIdAppareil) {
+        return rec.idAppareil === targetIdAppareil;
+      }
+
+      // 2. Profile ID targeting (e.g. specific waitress SRV-001)
+      if (targetIdProfil && targetIdProfil !== 'all') {
+        if (rec.idProfil === targetIdProfil) return true;
+        // Admins also receive supervisory notifications
+        if (rec.role === 'admin') return true;
+        return false;
+      }
+
+      // 3. Role targeting (e.g. kitchen or barman or cashier)
+      if (targetRole && targetRole !== 'all') {
+        if (rec.role === targetRole) return true;
+        if (rec.role === 'admin') return true;
+        return false;
+      }
+
+      return true; // Send to all if no filter
+    });
+
+    if (matchingRecords.length === 0) {
+      return { sent: 0, total: pushRecords.length };
+    }
+
+    const payloadStr = JSON.stringify({ title, body, data, tag });
+
+    let sentCount = 0;
+    const promises = matchingRecords.map(async (rec) => {
+      const sub = rec.subscription || rec;
+      if (!sub || !sub.endpoint) return;
+
       try {
         await webpush.sendNotification(sub, payloadStr);
+        sentCount++;
       } catch (err: any) {
-        if (err.statusCode === 410 || err.statusCode === 404) {
-          console.log(`🧹 Nettoyage souscription expirée: ${sub.endpoint.substring(0, 30)}...`);
+        const statusCode = err.statusCode || (err.error && err.error.statusCode);
+        const errMsg = String(err.message || err || '');
+        const isDeadSubscription = 
+          (typeof statusCode === 'number' && statusCode >= 400 && statusCode < 500) ||
+          errMsg.includes('unexpected response code') ||
+          errMsg.includes('NotRegistered') ||
+          errMsg.includes('InvalidRegistration') ||
+          errMsg.includes('expired') ||
+          errMsg.includes('unsubscribed') ||
+          errMsg.includes('410') ||
+          errMsg.includes('404') ||
+          errMsg.includes('400') ||
+          errMsg.includes('401') ||
+          errMsg.includes('403');
+
+        if (isDeadSubscription) {
+          // Clean up dead subscription
           if (isFirestoreConnected && firestoreDb) {
             try {
               const docId = Buffer.from(sub.endpoint).toString("hex").substring(0, 100);
               await deleteDoc(doc(firestoreDb, "push_subscriptions", docId));
             } catch {}
           }
-          memoryPushSubscriptions = memoryPushSubscriptions.filter(s => s.endpoint !== sub.endpoint);
+          memoryPushSubscriptions = memoryPushSubscriptions.filter((s: any) => (s.subscription?.endpoint || s.endpoint) !== sub.endpoint);
         } else {
-          console.warn("⚠️ Error sending WebPush notification:", err.message || err);
+          console.warn("⚠️ WebPush delivery notice:", errMsg);
         }
       }
     });
 
     await Promise.allSettled(promises);
+    return { sent: sentCount, total: matchingRecords.length };
   } catch (err: any) {
-    console.error("❌ Error sending Web Push notification:", err);
+    console.error("❌ Erreur d'envoi Web Push ciblé :", err);
+    return { sent: 0, total: 0 };
   }
 }
+
+async function sendPushNotificationToAll(payload: { title: string; body: string; data?: any; tag?: string }) {
+  return sendPushNotificationTargeted({
+    targetRole: 'all',
+    title: payload.title,
+    body: payload.body,
+    data: payload.data,
+    tag: payload.tag
+  });
+}
+
 
 async function seedDatabase() {
   if (isFirestoreConnected && firestoreDb) {
@@ -385,7 +622,22 @@ async function fetchArticlesList(): Promise<any[]> {
   if (isFirestoreConnected && firestoreDb) {
     try {
       const snap = await getDocs(collection(firestoreDb, "articles"));
-      return snap.docs.map((d) => d.data());
+      let list = snap.docs.map((d) => d.data());
+      const hasMilgo = list.some((a: any) => a.idArticle && a.idArticle.startsWith("ART-MIL-"));
+      if (list.length === 0 || !hasMilgo) {
+        console.log("🍗 Migration / Synchronisation du catalogue Milgo's dans Firestore...");
+        const batch = writeBatch(firestoreDb);
+        for (const art of INITIAL_ARTICLES) {
+          batch.set(doc(firestoreDb, "articles", art.idArticle), art);
+        }
+        for (const cat of INITIAL_CATEGORIES) {
+          batch.set(doc(firestoreDb, "categories", cat.idCategorie), { ...cat, dateCreation: new Date().toISOString() });
+        }
+        await batch.commit();
+        const freshSnap = await getDocs(collection(firestoreDb, "articles"));
+        list = freshSnap.docs.map((d) => d.data());
+      }
+      return list;
     } catch (err: any) {
       console.warn("⚠️ Firestore fetchArticles error:", err.message);
     }
@@ -446,15 +698,93 @@ app.get("/api/push/vapid-key", (req, res) => {
   res.json({ publicKey: vapidKeys.publicKey });
 });
 
-// Subscribe to Web Push Endpoint
+// Device Registry Endpoints (sorted by ID)
+app.get("/api/devices", async (req, res) => {
+  try {
+    const devices = await fetchDevicesList();
+    res.json(devices);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post("/api/devices/register", async (req, res) => {
+  try {
+    const { idAppareil, nomAppareil, idProfil, nomProfil, role, userAgent } = req.body;
+    if (!idAppareil) {
+      return res.status(400).json({ success: false, message: "ID Appareil requis" });
+    }
+    const saved = await saveDeviceRecord({
+      idAppareil,
+      nomAppareil,
+      idProfil,
+      nomProfil,
+      role,
+      userAgent
+    });
+    res.json({ success: true, device: saved });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.delete("/api/devices/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    await deleteDeviceRecord(id);
+    res.json({ success: true, message: `Appareil ${id} désenregistré.` });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Subscribe to Web Push Endpoint (links Device ID + Profile ID)
 app.post("/api/push/subscribe", async (req, res) => {
   try {
-    const { subscription } = req.body;
+    const { subscription, idAppareil, nomAppareil, idProfil, nomProfil, role, userAgent } = req.body;
     if (!subscription || !subscription.endpoint) {
       return res.status(400).json({ success: false, message: "Subscription payload required" });
     }
-    await savePushSubscription(subscription);
-    res.json({ success: true, message: "Souscription Web Push enregistrée avec succès !" });
+    await savePushSubscription(subscription, {
+      idAppareil,
+      nomAppareil,
+      idProfil,
+      nomProfil,
+      role,
+      userAgent
+    });
+    res.json({ 
+      success: true, 
+      message: `Souscription Web Push liée avec succès à l'appareil ${idAppareil || 'inconnu'} et au profil ${idProfil || 'invité'} !` 
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Targeted Push Notification Dispatch by ID / Role
+app.post("/api/push/send-targeted", async (req, res) => {
+  try {
+    const { targetIdProfil, targetIdAppareil, targetRole, title, body, tag, data } = req.body;
+    if (!title || !body) {
+      return res.status(400).json({ success: false, message: "Titre et corps de notification requis." });
+    }
+
+    const result = await sendPushNotificationTargeted({
+      targetIdProfil,
+      targetIdAppareil,
+      targetRole,
+      title,
+      body,
+      tag: tag || `targeted-${Date.now()}`,
+      data: data || { timestamp: Date.now() }
+    });
+
+    res.json({
+      success: true,
+      message: `Notification transmise à ${result.sent} appareil(s) cible(s) sur ${result.total} correspondants.`,
+      count: result.sent
+    });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -463,13 +793,39 @@ app.post("/api/push/subscribe", async (req, res) => {
 // Test Web Push Endpoint
 app.post("/api/push/test", async (req, res) => {
   try {
-    await sendPushNotificationToAll({
-      title: "💰 Commande Payée TEST-001 !",
-      body: "Table T-05 • Total: 12,500 FCFA (Espèces) • Signal Push iOS / Android en arrière-plan",
-      tag: "test-order-paid",
-      data: { url: "/", idCommande: "TEST-001" }
-    });
-    res.json({ success: true, message: "Notification Push de test diffusée avec succès à tous les téléphones enregistrés !" });
+    const { type, table, serveuse, idServeuse, idAppareil } = req.body || {};
+    const tableLabel = table ? `Table ${table}` : 'Table T-04';
+    const srv = serveuse ? ` • ${serveuse}` : '';
+
+    if (type === 'prep') {
+      await sendPushNotificationTargeted({
+        targetIdProfil: idServeuse,
+        targetIdAppareil: idAppareil,
+        title: "👨‍🍳 Commande en préparation #TEST-PREP",
+        body: `${tableLabel} • Prise en charge en cuisine/bar en cours !${srv}`,
+        tag: "test-order-prep",
+        data: { url: "/", idCommande: "TEST-PREP", statut: "En cuisine" }
+      });
+    } else if (type === 'ready') {
+      await sendPushNotificationTargeted({
+        targetIdProfil: idServeuse,
+        targetIdAppareil: idAppareil,
+        title: "🔔 Commande PRÊTE #TEST-PRÊTE !",
+        body: `${tableLabel} est PRÊTE ! Venez la récupérer pour la servir à table.${srv}`,
+        tag: "test-order-ready",
+        data: { url: "/", idCommande: "TEST-PRÊTE", statut: "Prête" }
+      });
+    } else {
+      await sendPushNotificationTargeted({
+        targetIdProfil: idServeuse,
+        targetIdAppareil: idAppareil,
+        title: "💰 Commande Payée #TEST-001 !",
+        body: "Table T-05 • Total: 12,500 FCFA (Espèces) • Signal Push ciblé par ID",
+        tag: "test-order-paid",
+        data: { url: "/", idCommande: "TEST-001", statut: "Payée" }
+      });
+    }
+    res.json({ success: true, message: "Notification Push ciblée transmise avec succès !" });
   } catch (err: any) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -844,6 +1200,40 @@ app.get("/api/articles", async (req, res) => {
   }
 });
 
+// Force sync / reload authentic Milgo's menu items
+app.post("/api/menu/sync-milgos", async (req, res) => {
+  try {
+    if (isFirestoreConnected && firestoreDb) {
+      const batch = writeBatch(firestoreDb);
+      // Clean previous non-milgo test articles
+      const existingArticlesSnap = await getDocs(collection(firestoreDb, "articles"));
+      for (const d of existingArticlesSnap.docs) {
+        if (!d.id.startsWith("ART-MIL-")) {
+          batch.delete(d.ref);
+        }
+      }
+      for (const art of INITIAL_ARTICLES) {
+        batch.set(doc(firestoreDb, "articles", art.idArticle), art);
+      }
+      for (const cat of INITIAL_CATEGORIES) {
+        batch.set(doc(firestoreDb, "categories", cat.idCategorie), { ...cat, dateCreation: new Date().toISOString() });
+      }
+      await batch.commit();
+    }
+    memoryArticles = [...INITIAL_ARTICLES];
+    memoryCategories = [...INITIAL_CATEGORIES];
+    const freshArticles = await fetchArticlesList();
+    res.json({
+      success: true,
+      message: `Menu officiel Milgo's synchronisé avec succès (${freshArticles.length} articles disponibles).`,
+      count: freshArticles.length,
+      articles: freshArticles
+    });
+  } catch (err: any) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 app.post("/api/articles", async (req, res) => {
   try {
     const { nom, categorie, prix, stock, emoji, image, description } = req.body || {};
@@ -1020,18 +1410,31 @@ app.post("/api/commandes", async (req, res) => {
     const validatedArticles = articles.map((item: any) => {
       const sousTotal = Number((item.prixUnitaire * item.quantite).toFixed(2));
       montantTotal += sousTotal;
+      const dbArticle = articlesList.find((a: any) => a.idArticle === item.idArticle);
       return {
         idArticle: item.idArticle,
         nom: item.nom,
         prixUnitaire: item.prixUnitaire,
         quantite: item.quantite,
         sousTotal: sousTotal,
+        categorie: item.categorie || dbArticle?.categorie || '',
         notes: item.notes || ""
       };
     });
 
     const nowStr = new Date().toISOString();
-    const idCommande = `CMD-${new Date().getFullYear()}-${Math.floor(Math.random() * 9000 + 1000)}`;
+    const idCommande = req.body.idCommande || `CMD-${new Date().getFullYear()}-${Math.floor(Math.random() * 9000 + 1000)}`;
+
+    // Check if order already exists (idempotent sync)
+    const existingCmd = (await fetchCommandesList()).find((c: any) => c.idCommande === idCommande);
+    if (existingCmd) {
+      return res.status(200).json({
+        success: true,
+        message: "Commande déjà synchronisée.",
+        commande: existingCmd,
+        articles: await fetchArticlesList()
+      });
+    }
 
     const newCommande = {
       idCommande,
@@ -1040,11 +1443,18 @@ app.post("/api/commandes", async (req, res) => {
       table: table || "Bar",
       articles: validatedArticles,
       montantTotal: Number(montantTotal.toFixed(2)),
-      statut: 'En attente' as const,
+      statut: (req.body.statut || 'En attente') as any,
       modePaiement: modePaiement || 'Non payé',
       notesServeuse: notesServeuse || '',
-      dateCreation: nowStr,
-      dateMiseAJour: nowStr
+      dateCreation: req.body.dateCreation || nowStr,
+      dateMiseAJour: req.body.dateMiseAJour || nowStr,
+      ...(req.body.idCaissier ? { idCaissier: req.body.idCaissier } : {}),
+      ...(req.body.nomCaissier ? { nomCaissier: req.body.nomCaissier } : {}),
+      ...(req.body.remise ? { remise: req.body.remise } : {}),
+      ...(typeof req.body.montantFinal === 'number' ? { montantFinal: req.body.montantFinal } : {}),
+      ...(typeof req.body.montantRecu === 'number' ? { montantRecu: req.body.montantRecu } : {}),
+      ...(typeof req.body.monnaieRendue === 'number' ? { monnaieRendue: req.body.monnaieRendue } : {}),
+      ...(req.body.datePaiement ? { datePaiement: req.body.datePaiement } : {})
     };
 
     // Step 3: Decrement Stock & Update Waitstaff Stats in Firestore
@@ -1075,17 +1485,37 @@ app.post("/api/commandes", async (req, res) => {
       // Save Commande
       batch.set(doc(firestoreDb, "commandes", idCommande), newCommande);
       await batch.commit();
+    }
 
-      // Trigger Web Push to all devices if order was paid on creation
-      if (newCommande.modePaiement !== 'Non payé') {
-        sendPushNotificationToAll({
-          title: `💰 Commande Payée #${idCommande} !`,
-          body: `Table ${newCommande.table} • Total: ${newCommande.montantTotal.toLocaleString()} FCFA (${newCommande.modePaiement}) • ${newCommande.nomServeuse}`,
-          tag: `order-paid-${idCommande}`,
-          data: { url: '/', idCommande }
-        });
-      }
+    // Trigger Targeted Web Push notification on creation
+    if (newCommande.modePaiement !== 'Non payé') {
+      sendPushNotificationTargeted({
+        targetIdProfil: newCommande.idServeuse,
+        targetRole: 'caissier',
+        title: `💰 Commande Payée #${idCommande} !`,
+        body: `Table ${newCommande.table} • Total: ${newCommande.montantTotal.toLocaleString()} FCFA (${newCommande.modePaiement}) • ${newCommande.nomServeuse}`,
+        tag: `order-status-${idCommande}`,
+        data: { url: '/', idCommande, statut: 'Payée', table: newCommande.table }
+      });
+    } else {
+      // Direct notification to kitchen & bar & admin
+      sendPushNotificationTargeted({
+        targetRole: 'cuisine',
+        title: `👨‍🍳 Nouvelle commande Cuisine #${idCommande} - Table ${newCommande.table}`,
+        body: `${newCommande.articles?.length || 1} produit(s) • Total: ${newCommande.montantTotal.toLocaleString()} FCFA • Serveuse: ${newCommande.nomServeuse}`,
+        tag: `order-new-${idCommande}`,
+        data: { url: '/', idCommande, statut: 'En attente', table: newCommande.table, idServeuse: newCommande.idServeuse }
+      });
+      sendPushNotificationTargeted({
+        targetRole: 'barman',
+        title: `🍹 Nouvelle commande Bar #${idCommande} - Table ${newCommande.table}`,
+        body: `${newCommande.articles?.length || 1} boisson(s) • Table ${newCommande.table} • Serveuse: ${newCommande.nomServeuse}`,
+        tag: `order-new-${idCommande}`,
+        data: { url: '/', idCommande, statut: 'En attente', table: newCommande.table, idServeuse: newCommande.idServeuse }
+      });
+    }
 
+    if (isFirestoreConnected && firestoreDb) {
       const freshArticles = await fetchArticlesList();
       return res.status(201).json({
         success: true,
@@ -1126,7 +1556,17 @@ app.post("/api/commandes", async (req, res) => {
 // Status change endpoint
 app.patch("/api/commandes/:id/statut", async (req, res) => {
   const { id } = req.params;
-  const { statut, modePaiement } = req.body;
+  const { 
+    statut, 
+    modePaiement, 
+    idCaissier, 
+    nomCaissier, 
+    remise, 
+    montantFinal, 
+    montantRecu, 
+    monnaieRendue, 
+    datePaiement 
+  } = req.body;
 
   try {
     const commandesList = await fetchCommandesList();
@@ -1141,6 +1581,14 @@ app.patch("/api/commandes/:id/statut", async (req, res) => {
 
     const updates: any = { statut, dateMiseAJour };
     if (modePaiement) updates.modePaiement = modePaiement;
+    if (idCaissier) updates.idCaissier = idCaissier;
+    if (nomCaissier) updates.nomCaissier = nomCaissier;
+    if (remise) updates.remise = remise;
+    if (typeof montantFinal === 'number') updates.montantFinal = montantFinal;
+    if (typeof montantRecu === 'number') updates.montantRecu = montantRecu;
+    if (typeof monnaieRendue === 'number') updates.monnaieRendue = monnaieRendue;
+    if (datePaiement) updates.datePaiement = datePaiement;
+    else if (statut === 'Payée' && !commande.datePaiement) updates.datePaiement = dateMiseAJour;
 
     // Restock items if order is cancelled
     const needsRestock = (statut === 'Annulée' && ancienStatut !== 'Annulée');
@@ -1163,9 +1611,7 @@ app.patch("/api/commandes/:id/statut", async (req, res) => {
     } else {
       const memCmd = memoryCommandes.find(c => c.idCommande === id);
       if (memCmd) {
-        memCmd.statut = statut;
-        if (modePaiement) memCmd.modePaiement = modePaiement;
-        memCmd.dateMiseAJour = dateMiseAJour;
+        Object.assign(memCmd, updates);
       }
 
       if (needsRestock) {
@@ -1179,13 +1625,60 @@ app.patch("/api/commandes/:id/statut", async (req, res) => {
     const updatedArticlesList = await fetchArticlesList();
     const updatedCommande = { ...commande, ...updates };
 
-    // Trigger Web Push to all devices when order is marked as Payée
-    if (statut === 'Payée') {
-      sendPushNotificationToAll({
-        title: `💰 Commande Payée #${id}!`,
-        body: `Table ${updatedCommande.table || 'Caisse'} • Total: ${(updatedCommande.montantTotal || 0).toLocaleString()} FCFA (${updatedCommande.modePaiement || 'Espèces'}) • ${updatedCommande.nomServeuse || 'Serveuse'}`,
-        tag: `order-paid-${id}`,
-        data: { url: '/', idCommande: id }
+    // Trigger Targeted Web Push notifications by Profile ID & Role
+    const serveuseName = updatedCommande.nomServeuse ? ` • Serveuse: ${updatedCommande.nomServeuse}` : '';
+    const tableLabel = updatedCommande.table ? `Table ${updatedCommande.table}` : 'En salle';
+    const targetIdProfil = updatedCommande.idServeuse;
+
+    if (statut === 'En cuisine') {
+      sendPushNotificationTargeted({
+        targetIdProfil,
+        title: `👨‍🍳 Commande en préparation #${id}`,
+        body: `${tableLabel} • Prise en charge en cuisine / bar en cours !${serveuseName}`,
+        tag: `order-status-${id}`,
+        data: { url: '/', idCommande: id, statut: 'En cuisine', table: updatedCommande.table }
+      });
+    } else if (statut === 'Prête') {
+      sendPushNotificationTargeted({
+        targetIdProfil,
+        title: `🔔 Commande PRÊTE #${id} !`,
+        body: `${tableLabel} est PRÊTE ! Venez la récupérer pour la servir à table.${serveuseName}`,
+        tag: `order-status-${id}`,
+        data: { url: '/', idCommande: id, statut: 'Prête', table: updatedCommande.table }
+      });
+    } else if (statut === 'Servie') {
+      sendPushNotificationTargeted({
+        targetIdProfil,
+        title: `✅ Commande Servie #${id}`,
+        body: `${tableLabel} a été servie aux clients à table.${serveuseName}`,
+        tag: `order-status-${id}`,
+        data: { url: '/', idCommande: id, statut: 'Servie', table: updatedCommande.table }
+      });
+    } else if (statut === 'Payée') {
+      const effectiveAmount = typeof updatedCommande.montantFinal === 'number' ? updatedCommande.montantFinal : (updatedCommande.montantTotal || 0);
+      sendPushNotificationTargeted({
+        targetIdProfil,
+        targetRole: 'caissier',
+        title: `💰 Commande Payée #${id} !`,
+        body: `${tableLabel} • Total: ${effectiveAmount.toLocaleString()} FCFA (${updatedCommande.modePaiement || 'Espèces'})${updatedCommande.nomCaissier ? ` • Caissier: ${updatedCommande.nomCaissier}` : ''}${serveuseName}`,
+        tag: `order-status-${id}`,
+        data: { url: '/', idCommande: id, statut: 'Payée', table: updatedCommande.table }
+      });
+    } else if (statut === 'Annulée') {
+      sendPushNotificationTargeted({
+        targetIdProfil,
+        title: `❌ Commande Annulée #${id}`,
+        body: `${tableLabel} a été annulée.${serveuseName}`,
+        tag: `order-status-${id}`,
+        data: { url: '/', idCommande: id, statut: 'Annulée', table: updatedCommande.table }
+      });
+    } else if (statut === 'En attente') {
+      sendPushNotificationTargeted({
+        targetIdProfil,
+        title: `⏳ Commande remise en attente #${id}`,
+        body: `${tableLabel} est en attente.${serveuseName}`,
+        tag: `order-status-${id}`,
+        data: { url: '/', idCommande: id, statut: 'En attente', table: updatedCommande.table }
       });
     }
 
@@ -1197,6 +1690,452 @@ app.patch("/api/commandes/:id/statut", async (req, res) => {
     });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// Batch Pay Endpoint (Grouped Checkout for Tables)
+app.post("/api/commandes/batch-pay", async (req, res) => {
+  const { 
+    idCommandes,
+    table = "Table",
+    modePaiement = "Espèces", 
+    idCaissier, 
+    nomCaissier, 
+    remise, 
+    montantFinal, 
+    montantRecu, 
+    monnaieRendue, 
+    datePaiement 
+  } = req.body;
+
+  if (!idCommandes || !Array.isArray(idCommandes) || idCommandes.length === 0) {
+    return res.status(400).json({ success: false, message: "Aucun identifiant de commande fourni pour l'encaissement groupé." });
+  }
+
+  try {
+    const dateMiseAJour = datePaiement || new Date().toISOString();
+    const allCommandes = await fetchCommandesList();
+    const targetCommandes = allCommandes.filter((c: any) => idCommandes.includes(c.idCommande));
+
+    if (targetCommandes.length === 0) {
+      return res.status(404).json({ success: false, message: "Aucune commande correspondante trouvée." });
+    }
+
+    const totalBrut = targetCommandes.reduce((sum: number, c: any) => sum + (c.montantTotal || 0), 0);
+    const globalFinal = typeof montantFinal === 'number' ? montantFinal : totalBrut;
+    const ratio = totalBrut > 0 ? globalFinal / totalBrut : 1;
+
+    const updatedCommandes: any[] = [];
+
+    if (isFirestoreConnected && firestoreDb) {
+      const batch = writeBatch(firestoreDb);
+
+      for (const cmd of targetCommandes) {
+        const cmdRef = doc(firestoreDb, "commandes", cmd.idCommande);
+        const orderPartFinal = Math.round(cmd.montantTotal * ratio);
+        const orderUpdates: any = {
+          statut: 'Payée',
+          modePaiement,
+          idCaissier: idCaissier || cmd.idCaissier || "CAISSIER",
+          nomCaissier: nomCaissier || cmd.nomCaissier || "Caisse",
+          datePaiement: dateMiseAJour,
+          dateMiseAJour,
+          montantFinal: orderPartFinal,
+          remise: remise || cmd.remise || null
+        };
+        batch.update(cmdRef, orderUpdates);
+        updatedCommandes.push({ ...cmd, ...orderUpdates });
+      }
+
+      await batch.commit();
+    } else {
+      for (const cmd of targetCommandes) {
+        const orderPartFinal = Math.round(cmd.montantTotal * ratio);
+        const orderUpdates: any = {
+          statut: 'Payée',
+          modePaiement,
+          idCaissier: idCaissier || cmd.idCaissier || "CAISSIER",
+          nomCaissier: nomCaissier || cmd.nomCaissier || "Caisse",
+          datePaiement: dateMiseAJour,
+          dateMiseAJour,
+          montantFinal: orderPartFinal,
+          remise: remise || cmd.remise || null
+        };
+        const memCmd = memoryCommandes.find(c => c.idCommande === cmd.idCommande);
+        if (memCmd) {
+          Object.assign(memCmd, orderUpdates);
+        }
+        updatedCommandes.push({ ...cmd, ...orderUpdates });
+      }
+    }
+
+    // Trigger Consolidated Push Notification
+    sendPushNotificationToAll({
+      title: `💰 Table ${table} Réglée (${globalFinal.toLocaleString()} FCFA) !`,
+      body: `${idCommandes.length} commande(s) soldée(s) en caisse par ${nomCaissier || 'la caisse'} • Mode: ${modePaiement}`,
+      tag: `order-status-table-${table}`,
+      data: { url: '/', table, statut: 'Payée', total: globalFinal }
+    });
+
+    const freshArticles = await fetchArticlesList();
+
+    res.json({
+      success: true,
+      message: `Table ${table} réglée avec succès (${idCommandes.length} commandes soldées).`,
+      commandes: updatedCommandes,
+      articles: freshArticles
+    });
+  } catch (err: any) {
+    console.error("Batch payment error:", err);
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// -------------------------------------------------------------
+// 3.5 BATCH OFFLINE SYNC API
+// Receives queued actions performed while offline and synchronizes them
+// -------------------------------------------------------------
+app.post("/api/sync/batch", async (req, res) => {
+  const { actions } = req.body;
+  if (!actions || !Array.isArray(actions)) {
+    return res.status(400).json({ success: false, message: "Liste d'actions de synchronisation invalide." });
+  }
+
+  console.log(`[Offline Sync] Processing ${actions.length} queued offline actions...`);
+  const results: any[] = [];
+
+  try {
+    for (const action of actions) {
+      const { type, payload } = action;
+      try {
+        switch (type) {
+          case 'CREATE_COMMANDE': {
+            const { idCommande, idServeuse, nomServeuse, table, articles, modePaiement, notesServeuse, dateCreation, statut } = payload;
+            const existingList = await fetchCommandesList();
+            const existing = existingList.find((c: any) => c.idCommande === idCommande);
+
+            if (!existing) {
+              const articlesList = await fetchArticlesList();
+              let montantTotal = 0;
+              const validatedArticles = (articles || []).map((item: any) => {
+                const sousTotal = Number((item.prixUnitaire * item.quantite).toFixed(2));
+                montantTotal += sousTotal;
+                return {
+                  idArticle: item.idArticle,
+                  nom: item.nom,
+                  prixUnitaire: item.prixUnitaire,
+                  quantite: item.quantite,
+                  sousTotal,
+                  categorie: item.categorie || '',
+                  notes: item.notes || ''
+                };
+              });
+
+              const nowStr = new Date().toISOString();
+              const newCmd = {
+                idCommande: idCommande || `CMD-${new Date().getFullYear()}-${Math.floor(Math.random() * 9000 + 1000)}`,
+                idServeuse: idServeuse || "SRV-000",
+                nomServeuse: nomServeuse || "Serveuse Inconnue",
+                table: table || "Bar",
+                articles: validatedArticles,
+                montantTotal: Number(montantTotal.toFixed(2)),
+                statut: (statut || payload.statut || 'En attente'),
+                modePaiement: modePaiement || 'Non payé',
+                notesServeuse: notesServeuse || '',
+                dateCreation: dateCreation || nowStr,
+                dateMiseAJour: nowStr,
+                ...(payload.idCaissier ? { idCaissier: payload.idCaissier } : {}),
+                ...(payload.nomCaissier ? { nomCaissier: payload.nomCaissier } : {}),
+                ...(payload.remise ? { remise: payload.remise } : {}),
+                ...(typeof payload.montantFinal === 'number' ? { montantFinal: payload.montantFinal } : {}),
+                ...(typeof payload.montantRecu === 'number' ? { montantRecu: payload.montantRecu } : {}),
+                ...(typeof payload.monnaieRendue === 'number' ? { monnaieRendue: payload.monnaieRendue } : {}),
+                ...(payload.datePaiement ? { datePaiement: payload.datePaiement } : {})
+              };
+
+              if (isFirestoreConnected && firestoreDb) {
+                const batch = writeBatch(firestoreDb);
+                for (const item of validatedArticles) {
+                  const artRef = doc(firestoreDb, "articles", item.idArticle);
+                  const artSnap = await getDoc(artRef);
+                  if (artSnap.exists()) {
+                    const currentStock = artSnap.data().stock || 0;
+                    batch.update(artRef, { stock: Math.max(0, currentStock - item.quantite) });
+                  }
+                }
+                const srvRef = doc(firestoreDb, "serveuses", newCmd.idServeuse);
+                const srvSnap = await getDoc(srvRef);
+                if (srvSnap.exists()) {
+                  const sData = srvSnap.data();
+                  batch.update(srvRef, {
+                    commandesTraitees: (sData.commandesTraitees || 0) + 1,
+                    chiffreAffaires: (sData.chiffreAffaires || 0) + newCmd.montantTotal
+                  });
+                }
+                batch.set(doc(firestoreDb, "commandes", newCmd.idCommande), newCmd);
+                await batch.commit();
+              } else {
+                for (const item of validatedArticles) {
+                  const target = memoryArticles.find(a => a.idArticle === item.idArticle);
+                  if (target) target.stock = Math.max(0, target.stock - item.quantite);
+                }
+                const srv = memoryServeuses.find(s => s.idServeuse === newCmd.idServeuse);
+                if (srv) {
+                  srv.commandesTraitees = (srv.commandesTraitees || 0) + 1;
+                  srv.chiffreAffaires = (srv.chiffreAffaires || 0) + newCmd.montantTotal;
+                }
+                memoryCommandes.unshift(newCmd as any);
+              }
+              results.push({ id: action.id, status: 'created', idCommande: newCmd.idCommande });
+            } else {
+              results.push({ id: action.id, status: 'already_exists', idCommande });
+            }
+            break;
+          }
+
+          case 'UPDATE_COMMANDE_STATUT': {
+            const { idCommande, statut, modePaiement, paymentDetails } = payload;
+            const allCmds = await fetchCommandesList();
+            const cmd = allCmds.find((c: any) => c.idCommande === idCommande);
+
+            if (cmd) {
+              const ancienStatut = cmd.statut;
+              const dateMiseAJour = new Date().toISOString();
+              const updates: any = { statut, dateMiseAJour };
+              if (modePaiement) updates.modePaiement = modePaiement;
+              if (paymentDetails) {
+                if (paymentDetails.idCaissier) updates.idCaissier = paymentDetails.idCaissier;
+                if (paymentDetails.nomCaissier) updates.nomCaissier = paymentDetails.nomCaissier;
+                if (paymentDetails.remise) updates.remise = paymentDetails.remise;
+                if (typeof paymentDetails.montantFinal === 'number') updates.montantFinal = paymentDetails.montantFinal;
+                if (typeof paymentDetails.montantRecu === 'number') updates.montantRecu = paymentDetails.montantRecu;
+                if (typeof paymentDetails.monnaieRendue === 'number') updates.monnaieRendue = paymentDetails.monnaieRendue;
+                if (paymentDetails.datePaiement) updates.datePaiement = paymentDetails.datePaiement;
+                else if (statut === 'Payée' && !cmd.datePaiement) updates.datePaiement = dateMiseAJour;
+              }
+
+              const needsRestock = (statut === 'Annulée' && ancienStatut !== 'Annulée');
+
+              if (isFirestoreConnected && firestoreDb) {
+                const batch = writeBatch(firestoreDb);
+                const cmdRef = doc(firestoreDb, "commandes", idCommande);
+                batch.update(cmdRef, updates);
+                if (needsRestock) {
+                  for (const item of cmd.articles) {
+                    const artRef = doc(firestoreDb, "articles", item.idArticle);
+                    const artSnap = await getDoc(artRef);
+                    if (artSnap.exists()) {
+                      batch.update(artRef, { stock: (artSnap.data().stock || 0) + item.quantite });
+                    }
+                  }
+                }
+                await batch.commit();
+              } else {
+                const mem = memoryCommandes.find(c => c.idCommande === idCommande);
+                if (mem) Object.assign(mem, updates);
+                if (needsRestock) {
+                  for (const item of cmd.articles) {
+                    const target = memoryArticles.find(a => a.idArticle === item.idArticle);
+                    if (target) target.stock += item.quantite;
+                  }
+                }
+              }
+              results.push({ id: action.id, status: 'updated', idCommande });
+            } else {
+              results.push({ id: action.id, status: 'not_found', idCommande });
+            }
+            break;
+          }
+
+          case 'CREATE_ARTICLE': {
+            const article = payload;
+            const allArts = await fetchArticlesList();
+            const idArticle = article.idArticle || `ART-${Math.floor(Math.random() * 90000 + 10000)}`;
+            const newArt = {
+              idArticle,
+              nom: article.nom || 'Nouvel Article',
+              categorie: article.categorie || 'Boissons',
+              prix: Number(article.prix) || 0,
+              stock: Number(article.stock) || 0,
+              stockInitial: Number(article.stockInitial || article.stock) || 0,
+              emoji: article.emoji || '📦',
+              image: article.image || '',
+              actif: article.actif ?? true,
+              description: article.description || ''
+            };
+            if (isFirestoreConnected && firestoreDb) {
+              await setDoc(doc(firestoreDb, "articles", idArticle), newArt);
+            } else {
+              const existingIdx = memoryArticles.findIndex(a => a.idArticle === idArticle);
+              if (existingIdx !== -1) memoryArticles[existingIdx] = newArt;
+              else memoryArticles.push(newArt);
+            }
+            results.push({ id: action.id, status: 'created', idArticle });
+            break;
+          }
+
+          case 'UPDATE_ARTICLE': {
+            const { idArticle, updates } = payload;
+            if (isFirestoreConnected && firestoreDb) {
+              const ref = doc(firestoreDb, "articles", idArticle);
+              await updateDoc(ref, updates);
+            } else {
+              const art = memoryArticles.find(a => a.idArticle === idArticle);
+              if (art) Object.assign(art, updates);
+            }
+            results.push({ id: action.id, status: 'updated', idArticle });
+            break;
+          }
+
+          case 'ADJUST_STOCK': {
+            const { idArticle, delta, nouveauStock } = payload;
+            if (isFirestoreConnected && firestoreDb) {
+              const ref = doc(firestoreDb, "articles", idArticle);
+              const snap = await getDoc(ref);
+              if (snap.exists()) {
+                const current = snap.data().stock || 0;
+                const nextStock = nouveauStock !== undefined ? Math.max(0, nouveauStock) : Math.max(0, current + (delta || 0));
+                await updateDoc(ref, { stock: nextStock });
+              }
+            } else {
+              const art = memoryArticles.find(a => a.idArticle === idArticle);
+              if (art) {
+                if (nouveauStock !== undefined) art.stock = Math.max(0, nouveauStock);
+                else if (delta !== undefined) art.stock = Math.max(0, art.stock + delta);
+              }
+            }
+            results.push({ id: action.id, status: 'stock_adjusted', idArticle });
+            break;
+          }
+
+          case 'DELETE_ARTICLE': {
+            const { idArticle } = payload;
+            if (isFirestoreConnected && firestoreDb) {
+              await deleteDoc(doc(firestoreDb, "articles", idArticle));
+            } else {
+              memoryArticles = memoryArticles.filter(a => a.idArticle !== idArticle);
+            }
+            results.push({ id: action.id, status: 'deleted', idArticle });
+            break;
+          }
+
+          case 'CREATE_TABLE': {
+            const { nom } = payload;
+            if (nom && nom.trim()) {
+              const trimmed = nom.trim();
+              if (isFirestoreConnected && firestoreDb) {
+                const tblId = `TBL-${trimmed.replace(/\s+/g, '-').toUpperCase()}`;
+                await setDoc(doc(firestoreDb, "tables", tblId), { idTable: tblId, nom: trimmed, dateCreation: new Date().toISOString() });
+              } else {
+                if (!memoryTables.some(t => t.nom.toLowerCase() === trimmed.toLowerCase())) {
+                  memoryTables.push({ idTable: `TBL-${Date.now()}`, nom: trimmed });
+                }
+              }
+            }
+            results.push({ id: action.id, status: 'table_created' });
+            break;
+          }
+
+          case 'DELETE_TABLE': {
+            const { nom } = payload;
+            if (nom) {
+              if (isFirestoreConnected && firestoreDb) {
+                const snap = await getDocs(collection(firestoreDb, "tables"));
+                for (const d of snap.docs) {
+                  if (d.data().nom === nom) await deleteDoc(d.ref);
+                }
+              } else {
+                memoryTables = memoryTables.filter(t => t.nom !== nom);
+              }
+            }
+            results.push({ id: action.id, status: 'table_deleted' });
+            break;
+          }
+
+          case 'CREATE_CATEGORY': {
+            const { nom, emoji } = payload;
+            if (nom && nom.trim()) {
+              const catId = `CAT-${Math.floor(Math.random() * 9000 + 1000)}`;
+              const newCat = { idCategorie: catId, nom: nom.trim(), emoji: emoji || '🏷️', dateCreation: new Date().toISOString() };
+              if (isFirestoreConnected && firestoreDb) {
+                await setDoc(doc(firestoreDb, "categories", catId), newCat);
+              } else {
+                if (!memoryCategories.some(c => c.nom.toLowerCase() === nom.trim().toLowerCase())) {
+                  memoryCategories.push(newCat);
+                }
+              }
+            }
+            results.push({ id: action.id, status: 'category_created' });
+            break;
+          }
+
+          case 'DELETE_CATEGORY': {
+            const { nomOrId } = payload;
+            if (nomOrId) {
+              if (isFirestoreConnected && firestoreDb) {
+                const snap = await getDocs(collection(firestoreDb, "categories"));
+                for (const d of snap.docs) {
+                  const data = d.data();
+                  if (data.idCategorie === nomOrId || data.nom.toLowerCase() === nomOrId.toLowerCase()) {
+                    await deleteDoc(d.ref);
+                  }
+                }
+              } else {
+                memoryCategories = memoryCategories.filter(c => c.idCategorie !== nomOrId && c.nom.toLowerCase() !== nomOrId.toLowerCase());
+              }
+            }
+            results.push({ id: action.id, status: 'category_deleted' });
+            break;
+          }
+
+          case 'UPDATE_SERVEUSE_PIN': {
+            const { idServeuse, newPin } = payload;
+            if (isFirestoreConnected && firestoreDb) {
+              await updateDoc(doc(firestoreDb, "serveuses", idServeuse), { pin: newPin });
+            } else {
+              const s = memoryServeuses.find(x => x.idServeuse === idServeuse);
+              if (s) s.pin = newPin;
+            }
+            results.push({ id: action.id, status: 'pin_updated', idServeuse });
+            break;
+          }
+
+          default:
+            results.push({ id: action.id, status: 'unsupported_type', type });
+        }
+      } catch (innerErr: any) {
+        console.warn(`[Offline Sync] Action ${action.type} error:`, innerErr.message);
+        results.push({ id: action.id, status: 'error', error: innerErr.message });
+      }
+    }
+
+    // Fetch refreshed data from database to send back to client
+    const [freshArticles, freshCommandes, freshTables, freshCategories, freshServeuses] = await Promise.all([
+      fetchArticlesList(),
+      fetchCommandesList(),
+      fetchTablesList(),
+      fetchCategoriesList(),
+      fetchServeusesList()
+    ]);
+
+    const tableNames = freshTables.map(t => typeof t === 'string' ? t : t.nom);
+
+    res.json({
+      success: true,
+      processedCount: actions.length,
+      results,
+      freshData: {
+        articles: freshArticles,
+        commandes: freshCommandes,
+        tables: tableNames,
+        categories: freshCategories,
+        serveuses: freshServeuses
+      }
+    });
+
+  } catch (err: any) {
+    console.error("[Offline Sync] Fatal error during batch sync:", err);
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 

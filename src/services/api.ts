@@ -1,5 +1,6 @@
 import { Article, Serveuse, Commande, StatistiquesVentes, Categorie } from '../types';
 import { INITIAL_ARTICLES, INITIAL_SERVEUSES, INITIAL_COMMANDES, INITIAL_TABLES, INITIAL_CATEGORIES } from '../data/initialData';
+import { syncManager } from '../utils/syncManager';
 
 const STORAGE_KEY_ARTICLES = 'orderease_articles_cache';
 const STORAGE_KEY_SERVEUSES = 'orderease_serveuses_cache';
@@ -32,17 +33,34 @@ const NO_CACHE_HEADERS = {
 };
 
 async function apiFetch(url: string, options: RequestInit = {}) {
+  // Fast offline check
+  if (typeof navigator !== 'undefined' && !navigator.onLine) {
+    throw new Error('Hors-ligne (Appareil non connecté au réseau)');
+  }
+
   const separator = url.includes('?') ? '&' : '?';
   const cacheBustUrl = `${url}${separator}_t=${Date.now()}`;
   const mergedHeaders = {
     ...NO_CACHE_HEADERS,
     ...(options.headers || {})
   };
-  return fetch(cacheBustUrl, {
-    ...options,
-    cache: 'no-store',
-    headers: mergedHeaders
-  });
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 6000);
+
+  try {
+    const response = await fetch(cacheBustUrl, {
+      ...options,
+      cache: 'no-store',
+      headers: mergedHeaders,
+      signal: options.signal || controller.signal
+    });
+    clearTimeout(timeoutId);
+    return response;
+  } catch (err) {
+    clearTimeout(timeoutId);
+    throw err;
+  }
 }
 
 export const posApi = {
@@ -108,6 +126,28 @@ export const posApi = {
     }
   },
 
+  // Sync / Reset official Milgo's menu
+  async syncMilgosMenu(): Promise<{ success: boolean; count?: number; message?: string; articles?: Article[] }> {
+    try {
+      const res = await apiFetch('/api/menu/sync-milgos', { method: 'POST' });
+      const data = await res.json();
+      if (data.articles && Array.isArray(data.articles)) {
+        saveLocal(STORAGE_KEY_ARTICLES, data.articles);
+        saveLocal(STORAGE_KEY_CATEGORIES, INITIAL_CATEGORIES);
+      }
+      return data;
+    } catch (e: any) {
+      saveLocal(STORAGE_KEY_ARTICLES, INITIAL_ARTICLES);
+      saveLocal(STORAGE_KEY_CATEGORIES, INITIAL_CATEGORIES);
+      return {
+        success: true,
+        count: INITIAL_ARTICLES.length,
+        message: 'Menu officiel Milgo\'s synchronisé en cache local.',
+        articles: INITIAL_ARTICLES
+      };
+    }
+  },
+
   // --- TABLES ---
   async getTables(): Promise<string[]> {
     try {
@@ -142,12 +182,14 @@ export const posApi = {
       }
       return data;
     } catch (e) {
+      const trimmed = nom.trim();
       const current = getLocal<string[]>(STORAGE_KEY_TABLES, INITIAL_TABLES.map(t => t.nom));
-      if (!current.includes(nom.trim())) {
-        current.push(nom.trim());
+      if (!current.includes(trimmed)) {
+        current.push(trimmed);
         saveLocal(STORAGE_KEY_TABLES, current);
       }
-      return { success: true, table: { nom: nom.trim() } };
+      syncManager.enqueue('CREATE_TABLE', { nom: trimmed }, `Ajout table ${trimmed}`);
+      return { success: true, table: { nom: trimmed }, message: 'Table ajoutée en cache local (hors-ligne)' };
     }
   },
 
@@ -164,7 +206,8 @@ export const posApi = {
     } catch (e) {
       const current = getLocal<string[]>(STORAGE_KEY_TABLES, INITIAL_TABLES.map(t => t.nom)).filter(t => t !== nom);
       saveLocal(STORAGE_KEY_TABLES, current);
-      return { success: true };
+      syncManager.enqueue('DELETE_TABLE', { nom }, `Suppression table ${nom}`);
+      return { success: true, message: 'Table supprimée en cache local (hors-ligne)' };
     }
   },
 
@@ -215,7 +258,8 @@ export const posApi = {
         current.push(newCat);
         saveLocal(STORAGE_KEY_CATEGORIES, current);
       }
-      return { success: true, category: newCat };
+      syncManager.enqueue('CREATE_CATEGORY', newCat, `Ajout catégorie ${newCat.nom}`);
+      return { success: true, category: newCat, message: 'Catégorie enregistrée en cache local (hors-ligne)' };
     }
   },
 
@@ -234,7 +278,8 @@ export const posApi = {
       const current = getLocal<Categorie[]>(STORAGE_KEY_CATEGORIES, INITIAL_CATEGORIES)
         .filter(c => c.nom.toLowerCase() !== nomOrId.toLowerCase() && c.idCategorie !== nomOrId);
       saveLocal(STORAGE_KEY_CATEGORIES, current);
-      return { success: true };
+      syncManager.enqueue('DELETE_CATEGORY', { nomOrId }, `Suppression catégorie ${nomOrId}`);
+      return { success: true, message: 'Catégorie supprimée en cache local (hors-ligne)' };
     }
   },
 
@@ -285,7 +330,15 @@ export const posApi = {
       }
       return data;
     } catch (e: any) {
-      return { success: false, message: 'Erreur réseau lors de la mise à jour du PIN' };
+      const local = getLocal<Serveuse[]>(STORAGE_KEY_SERVEUSES, INITIAL_SERVEUSES);
+      const idx = local.findIndex(s => s.idServeuse === idServeuse);
+      if (idx !== -1) {
+        local[idx].pin = newPin;
+        saveLocal(STORAGE_KEY_SERVEUSES, local);
+        syncManager.enqueue('UPDATE_SERVEUSE_PIN', { idServeuse, newPin }, `Mise à jour PIN ${idServeuse}`);
+        return { success: true, message: 'PIN modifié en cache local (hors-ligne)' };
+      }
+      return { success: false, message: 'Serveuse non trouvée' };
     }
   },
 
@@ -386,19 +439,20 @@ export const posApi = {
       console.warn('API createArticle failed, applying offline fallback:', e?.message || e);
       const list = getLocal<Article[]>(STORAGE_KEY_ARTICLES, INITIAL_ARTICLES);
       const created: Article = {
-        idArticle: `ART-${Math.floor(Math.random() * 90000 + 10000)}`,
+        idArticle: article.idArticle || `ART-${Math.floor(Math.random() * 90000 + 10000)}`,
         nom: article.nom || 'Nouvel Article',
         categorie: article.categorie || 'Boissons',
         prix: Number(article.prix) || 0,
         stock: Number(article.stock) || 0,
-        stockInitial: Number(article.stock) || 0,
+        stockInitial: Number(article.stockInitial || article.stock) || 0,
         emoji: article.emoji || '📦',
         image: article.image || '',
-        actif: true,
+        actif: article.actif ?? true,
         description: article.description || ''
       };
       list.push(created);
       saveLocal(STORAGE_KEY_ARTICLES, list);
+      syncManager.enqueue('CREATE_ARTICLE', created, `Création article ${created.nom}`);
       return created;
     }
   },
@@ -423,6 +477,7 @@ export const posApi = {
       if (idx !== -1) {
         list[idx] = { ...list[idx], ...updates };
         saveLocal(STORAGE_KEY_ARTICLES, list);
+        syncManager.enqueue('UPDATE_ARTICLE', { idArticle, updates }, `Mise à jour ${list[idx].nom}`);
         return list[idx];
       }
       throw new Error('Article non trouvé');
@@ -446,6 +501,7 @@ export const posApi = {
         if (nouveauStock !== undefined) art.stock = Math.max(0, nouveauStock);
         else if (delta !== undefined) art.stock = Math.max(0, art.stock + delta);
         saveLocal(STORAGE_KEY_ARTICLES, list);
+        syncManager.enqueue('ADJUST_STOCK', { idArticle, delta, nouveauStock }, `Stock ${art.nom}: ${art.stock}`);
         return art;
       }
       throw new Error('Article non trouvé');
@@ -462,6 +518,7 @@ export const posApi = {
       let list = getLocal<Article[]>(STORAGE_KEY_ARTICLES, INITIAL_ARTICLES);
       list = list.filter(a => a.idArticle !== idArticle);
       saveLocal(STORAGE_KEY_ARTICLES, list);
+      syncManager.enqueue('DELETE_ARTICLE', { idArticle }, `Suppression article ${idArticle}`);
       return true;
     }
   },
@@ -483,15 +540,16 @@ export const posApi = {
     idServeuse: string;
     nomServeuse: string;
     table: string;
-    articles: { idArticle: string; nom: string; prixUnitaire: number; quantite: number; notes?: string }[];
+    articles: { idArticle: string; nom: string; prixUnitaire: number; quantite: number; categorie?: string; notes?: string }[];
     modePaiement?: string;
     notesServeuse?: string;
   }): Promise<{ success: boolean; commande?: Commande; articles?: Article[]; message?: string; errors?: string[] }> {
+    const generatedId = `CMD-2026-${Math.floor(Math.random() * 9000 + 1000)}`;
     try {
       const res = await apiFetch('/api/commandes', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(commandeData)
+        body: JSON.stringify({ ...commandeData, idCommande: generatedId })
       });
       const responseData = await res.json();
 
@@ -505,6 +563,11 @@ export const posApi = {
 
       if (responseData.articles) {
         saveLocal(STORAGE_KEY_ARTICLES, responseData.articles);
+      }
+      if (responseData.commande) {
+        const currentCmds = getLocal<Commande[]>(STORAGE_KEY_COMMANDES, INITIAL_COMMANDES);
+        currentCmds.unshift(responseData.commande);
+        saveLocal(STORAGE_KEY_COMMANDES, currentCmds);
       }
       return responseData;
     } catch (e) {
@@ -537,7 +600,7 @@ export const posApi = {
 
       const nowStr = new Date().toISOString();
       const newCmd: Commande = {
-        idCommande: `CMD-2026-${Math.floor(Math.random() * 9000 + 1000)}`,
+        idCommande: generatedId,
         idServeuse: commandeData.idServeuse,
         nomServeuse: commandeData.nomServeuse,
         table: commandeData.table,
@@ -554,24 +617,63 @@ export const posApi = {
       commandesList.unshift(newCmd);
       saveLocal(STORAGE_KEY_COMMANDES, commandesList);
 
+      // Enqueue in offline sync queue
+      syncManager.enqueue(
+        'CREATE_COMMANDE',
+        newCmd,
+        `Commande #${newCmd.idCommande} (Table ${newCmd.table})`
+      );
+
       return {
         success: true,
         commande: newCmd,
         articles: articlesList,
-        message: 'Commande validée en mode local (décrémentation effectuée)'
+        message: 'Commande enregistrée en cache local (hors-ligne). Synchronisation en attente.'
       };
     }
   },
 
-  async updateStatutCommande(idCommande: string, statut: string, modePaiement?: string): Promise<{ success: boolean; commande?: Commande; articles?: Article[] }> {
+  async updateStatutCommande(
+    idCommande: string, 
+    statut: string, 
+    modePaiement?: string,
+    paymentDetails?: {
+      idCaissier?: string;
+      nomCaissier?: string;
+      remise?: { type: 'percent' | 'fixed'; valeur: number; montantRemise: number };
+      montantFinal?: number;
+      montantRecu?: number;
+      monnaieRendue?: number;
+      datePaiement?: string;
+    }
+  ): Promise<{ success: boolean; commande?: Commande; articles?: Article[] }> {
     try {
+      const payload: any = { statut, modePaiement };
+      if (paymentDetails) {
+        if (paymentDetails.idCaissier) payload.idCaissier = paymentDetails.idCaissier;
+        if (paymentDetails.nomCaissier) payload.nomCaissier = paymentDetails.nomCaissier;
+        if (paymentDetails.remise) payload.remise = paymentDetails.remise;
+        if (typeof paymentDetails.montantFinal === 'number') payload.montantFinal = paymentDetails.montantFinal;
+        if (typeof paymentDetails.montantRecu === 'number') payload.montantRecu = paymentDetails.montantRecu;
+        if (typeof paymentDetails.monnaieRendue === 'number') payload.monnaieRendue = paymentDetails.monnaieRendue;
+        if (paymentDetails.datePaiement) payload.datePaiement = paymentDetails.datePaiement;
+      }
+
       const res = await apiFetch(`/api/commandes/${idCommande}/statut`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ statut, modePaiement })
+        body: JSON.stringify(payload)
       });
       const data = await res.json();
       if (data.articles) saveLocal(STORAGE_KEY_ARTICLES, data.articles);
+      if (data.commande) {
+        const cmds = getLocal<Commande[]>(STORAGE_KEY_COMMANDES, INITIAL_COMMANDES);
+        const idx = cmds.findIndex(c => c.idCommande === idCommande);
+        if (idx !== -1) {
+          cmds[idx] = data.commande;
+          saveLocal(STORAGE_KEY_COMMANDES, cmds);
+        }
+      }
       return data;
     } catch (e) {
       const commandes = getLocal<Commande[]>(STORAGE_KEY_COMMANDES, INITIAL_COMMANDES);
@@ -580,6 +682,15 @@ export const posApi = {
         const oldStatut = cmd.statut;
         cmd.statut = statut as any;
         if (modePaiement) cmd.modePaiement = modePaiement as any;
+        if (paymentDetails) {
+          if (paymentDetails.idCaissier) cmd.idCaissier = paymentDetails.idCaissier;
+          if (paymentDetails.nomCaissier) cmd.nomCaissier = paymentDetails.nomCaissier;
+          if (paymentDetails.remise) cmd.remise = paymentDetails.remise;
+          if (typeof paymentDetails.montantFinal === 'number') cmd.montantFinal = paymentDetails.montantFinal;
+          if (typeof paymentDetails.montantRecu === 'number') cmd.montantRecu = paymentDetails.montantRecu;
+          if (typeof paymentDetails.monnaieRendue === 'number') cmd.monnaieRendue = paymentDetails.monnaieRendue;
+          if (paymentDetails.datePaiement) cmd.datePaiement = paymentDetails.datePaiement;
+        }
         cmd.dateMiseAJour = new Date().toISOString();
 
         // Restore stock if cancelled
@@ -593,9 +704,98 @@ export const posApi = {
         }
 
         saveLocal(STORAGE_KEY_COMMANDES, commandes);
+
+        // Enqueue offline action
+        syncManager.enqueue(
+          'UPDATE_COMMANDE_STATUT',
+          { idCommande, statut, modePaiement, paymentDetails },
+          `Mise à jour #${idCommande} -> ${statut}`
+        );
+
         return { success: true, commande: cmd, articles: getLocal<Article[]>(STORAGE_KEY_ARTICLES, INITIAL_ARTICLES) };
       }
       return { success: false };
+    }
+  },
+
+  async batchPayTableCommandes(
+    idCommandes: string[],
+    paymentData: {
+      table?: string;
+      modePaiement: string;
+      idCaissier?: string;
+      nomCaissier?: string;
+      remise?: { type: 'percent' | 'fixed'; valeur: number; montantRemise: number };
+      montantFinal?: number;
+      montantRecu?: number;
+      monnaieRendue?: number;
+      datePaiement?: string;
+    }
+  ): Promise<{ success: boolean; commandes?: Commande[]; articles?: Article[]; message?: string }> {
+    try {
+      const res = await apiFetch('/api/commandes/batch-pay', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ idCommandes, ...paymentData })
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.message || 'Erreur lors du paiement groupé');
+      if (data.articles) saveLocal(STORAGE_KEY_ARTICLES, data.articles);
+      return data;
+    } catch (e: any) {
+      console.warn('API batchPayTableCommandes fallback to offline local logic:', e?.message || e);
+      const commandes = getLocal<Commande[]>(STORAGE_KEY_COMMANDES, INITIAL_COMMANDES);
+      const dateMiseAJour = paymentData.datePaiement || new Date().toISOString();
+      const updatedList: Commande[] = [];
+
+      const targetList = commandes.filter(c => idCommandes.includes(c.idCommande));
+      const totalBrut = targetList.reduce((sum, c) => sum + (c.montantTotal || 0), 0);
+      const globalFinal = typeof paymentData.montantFinal === 'number' ? paymentData.montantFinal : totalBrut;
+      const ratio = totalBrut > 0 ? globalFinal / totalBrut : 1;
+
+      for (const cmd of commandes) {
+        if (idCommandes.includes(cmd.idCommande)) {
+          cmd.statut = 'Payée';
+          cmd.modePaiement = paymentData.modePaiement as any;
+          if (paymentData.idCaissier) cmd.idCaissier = paymentData.idCaissier;
+          if (paymentData.nomCaissier) cmd.nomCaissier = paymentData.nomCaissier;
+          if (paymentData.remise) cmd.remise = paymentData.remise;
+          cmd.montantFinal = Math.round(cmd.montantTotal * ratio);
+          if (typeof paymentData.montantRecu === 'number') cmd.montantRecu = paymentData.montantRecu;
+          if (typeof paymentData.monnaieRendue === 'number') cmd.monnaieRendue = paymentData.monnaieRendue;
+          cmd.datePaiement = dateMiseAJour;
+          cmd.dateMiseAJour = dateMiseAJour;
+          updatedList.push(cmd);
+
+          // Enqueue each payment update in offline sync queue
+          syncManager.enqueue(
+            'UPDATE_COMMANDE_STATUT',
+            {
+              idCommande: cmd.idCommande,
+              statut: 'Payée',
+              modePaiement: cmd.modePaiement,
+              paymentDetails: {
+                idCaissier: cmd.idCaissier,
+                nomCaissier: cmd.nomCaissier,
+                remise: cmd.remise,
+                montantFinal: cmd.montantFinal,
+                montantRecu: cmd.montantRecu,
+                monnaieRendue: cmd.monnaieRendue,
+                datePaiement: cmd.datePaiement
+              }
+            },
+            `Paiement groupé #${cmd.idCommande} (${cmd.table})`
+          );
+        }
+      }
+
+      saveLocal(STORAGE_KEY_COMMANDES, commandes);
+      return {
+        success: true,
+        commandes: updatedList,
+        articles: getLocal<Article[]>(STORAGE_KEY_ARTICLES, INITIAL_ARTICLES),
+        message: `Paiement groupé effectué en cache local (${updatedList.length} commandes). Synchronisation en attente.`
+      };
     }
   },
 
@@ -624,5 +824,62 @@ export const posApi = {
         topArticles: articles.slice(0, 5).map(a => ({ idArticle: a.idArticle, nom: a.nom, quantiteVendue: 12, chiffreAffaires: 84.00 }))
       };
     }
+  },
+
+  // --- CONNECTED DEVICES & NOTIFICATION ROUTING BY ID ---
+  async getDevices(): Promise<import('../types').DeviceRegistration[]> {
+    try {
+      const res = await apiFetch('/api/devices');
+      if (!res.ok) throw new Error('Error fetching devices');
+      const data = await res.json();
+      return Array.isArray(data) ? data : [];
+    } catch (e) {
+      return [];
+    }
+  },
+
+  async registerDevice(deviceData: {
+    idAppareil: string;
+    nomAppareil: string;
+    idProfil: string;
+    nomProfil: string;
+    role: string;
+    userAgent?: string;
+  }): Promise<{ success: boolean; device?: import('../types').DeviceRegistration }> {
+    try {
+      const res = await apiFetch('/api/devices/register', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(deviceData)
+      });
+      return await res.json();
+    } catch (e: any) {
+      return { success: false };
+    }
+  },
+
+  async deleteDevice(idAppareil: string): Promise<{ success: boolean; message?: string }> {
+    try {
+      const res = await apiFetch(`/api/devices/${encodeURIComponent(idAppareil)}`, {
+        method: 'DELETE'
+      });
+      return await res.json();
+    } catch (e: any) {
+      return { success: false, message: e.message };
+    }
+  },
+
+  async sendTargetedNotification(payload: import('../types').TargetNotificationPayload): Promise<{ success: boolean; count?: number; message?: string }> {
+    try {
+      const res = await apiFetch('/api/push/send-targeted', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      return await res.json();
+    } catch (e: any) {
+      return { success: false, message: e.message };
+    }
   }
 };
+

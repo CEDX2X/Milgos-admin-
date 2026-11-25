@@ -1,8 +1,10 @@
-const CACHE_NAME = 'forwardone-pos-v2';
+const CACHE_NAME = 'milgos-pos-v4';
 const STATIC_ASSETS = [
   '/',
   '/index.html',
   '/manifest.json',
+  '/logo.svg',
+  '/logo.png',
   '/favicon.png',
   '/apple-touch-icon.png',
   '/icon-192.png',
@@ -13,7 +15,7 @@ const STATIC_ASSETS = [
 self.addEventListener('install', (event) => {
   event.waitUntil(
     caches.open(CACHE_NAME).then((cache) => {
-      console.log('[PWA ServiceWorker] Caching static app shell');
+      console.log('[PWA ServiceWorker] Caching static app shell v4');
       return cache.addAll(STATIC_ASSETS);
     }).then(() => self.skipWaiting())
   );
@@ -35,8 +37,10 @@ self.addEventListener('activate', (event) => {
 });
 
 self.addEventListener('fetch', (event) => {
-  // Network first for API requests to ensure fresh stock data
-  if (event.request.url.includes('/api/')) {
+  const url = new URL(event.request.url);
+
+  // Network first for API requests to ensure fresh data
+  if (url.pathname.startsWith('/api/')) {
     event.respondWith(
       fetch(event.request).catch(() => {
         return caches.match(event.request);
@@ -45,21 +49,55 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // Cache first with network fallback for UI assets
+  // Navigation requests: Return cached index.html if offline
+  if (event.request.mode === 'navigate') {
+    event.respondWith(
+      fetch(event.request).catch(async () => {
+        const cachedIndex = await caches.match('/index.html') || await caches.match('/');
+        if (cachedIndex) return cachedIndex;
+        return new Response('Application hors-ligne. Rebranchez la connexion pour la première ouverture.', {
+          status: 503,
+          headers: { 'Content-Type': 'text/plain; charset=utf-8' }
+        });
+      })
+    );
+    return;
+  }
+
+  // Cache first with network fallback and dynamic caching for UI assets & JS/CSS chunks
   event.respondWith(
     caches.match(event.request).then((response) => {
       if (response) {
         return response;
       }
       return fetch(event.request).then((networkResponse) => {
-        if (!networkResponse || networkResponse.status !== 200 || networkResponse.type !== 'basic') {
+        if (!networkResponse || networkResponse.status !== 200 || (networkResponse.type !== 'basic' && networkResponse.type !== 'cors')) {
           return networkResponse;
         }
-        const responseToCache = networkResponse.clone();
-        caches.open(CACHE_NAME).then((cache) => {
-          cache.put(event.request, responseToCache);
-        });
+        // Cache assets for offline use (scripts, css, images, fonts)
+        if (
+          url.pathname.endsWith('.js') || 
+          url.pathname.endsWith('.css') || 
+          url.pathname.endsWith('.png') || 
+          url.pathname.endsWith('.svg') || 
+          url.pathname.endsWith('.ico') ||
+          url.pathname.includes('/assets/') ||
+          url.pathname.includes('/src/') ||
+          url.pathname.includes('/@vite/') ||
+          url.pathname.includes('/node_modules/')
+        ) {
+          const responseToCache = networkResponse.clone();
+          caches.open(CACHE_NAME).then((cache) => {
+            cache.put(event.request, responseToCache);
+          });
+        }
         return networkResponse;
+      }).catch(async () => {
+        // Fallback for image requests if offline
+        if (event.request.destination === 'image') {
+          return caches.match('/favicon.png') || caches.match('/logo.png');
+        }
+        return null;
       });
     })
   );

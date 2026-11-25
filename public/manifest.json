@@ -1,12 +1,19 @@
 {
   "short_name": "Milgos",
-  "name": "Milgos",
+  "name": "Milgos - Fired Up Chicken",
   "description": "Application POS & Gestion de Caisse Milgos",
   "icons": [
     {
+      "src": "/favicon.png",
+      "type": "image/png",
+      "sizes": "64x64",
+      "purpose": "any"
+    },
+    {
       "src": "/apple-touch-icon.png",
       "type": "image/png",
-      "sizes": "180x180"
+      "sizes": "180x180",
+      "purpose": "any"
     },
     {
       "src": "/icon-192.png",
@@ -19,11 +26,23 @@
       "type": "image/png",
       "sizes": "512x512",
       "purpose": "any maskable"
+    },
+    {
+      "src": "/logo.png",
+      "type": "image/png",
+      "sizes": "512x512",
+      "purpose": "any"
+    },
+    {
+      "src": "/logo.svg",
+      "type": "image/svg+xml",
+      "sizes": "any",
+      "purpose": "any"
     }
   ],
   "start_url": "/",
-  "background_color": "#000000",
-  "theme_color": "#000000",
+  "background_color": "#FFFFFF",
+  "theme_color": "#D8262C",
   "display": "standalone",
   "orientation": "any"
 }

@@ -3,7 +3,8 @@ import {
   Settings, Coins, Trash2, RotateCcw, Database, AlertTriangle, 
   CheckCircle2, RefreshCw, ShoppingBag, Package, Layers, 
   ShieldAlert, Cpu, Server, Smartphone, Code, CheckCircle, LogOut,
-  Sun, Moon, Monitor, Palette, Bell, Volume2, Tag, FolderPlus, Plus, Grid
+  Sun, Moon, Monitor, Palette, Bell, Volume2, Tag, FolderPlus, Plus, Grid,
+  ChefHat, Wine, Sparkles, Lock
 } from 'lucide-react';
 import { getCurrency, setCurrency, formatPrice } from '../utils/format';
 import { getThemeMode, applyTheme, ThemeMode } from '../utils/theme';
@@ -11,11 +12,16 @@ import {
   getNotificationPermission, 
   requestNotificationPermission, 
   sendOrderPaidNotification,
+  sendOrderStatusNotification,
+  playPreparationChime,
+  playReadyBellChime,
   NotificationPermissionState 
 } from '../utils/notifications';
 
-import { Serveuse, Categorie, Article } from '../types';
+import { Serveuse, Categorie, Article, DeviceRegistration } from '../types';
 import { posApi } from '../services/api';
+import { getOrCreateDeviceId, getDeviceName, setDeviceName, syncDeviceRegistration } from '../utils/device';
+import { Send, Users, Radio, SmartphoneCharging, Copy, Check } from 'lucide-react';
 
 interface SettingsViewProps {
   currentServeuse?: Serveuse | null;
@@ -137,11 +143,74 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     const perm = await requestNotificationPermission();
     setNotifPermission(perm);
     if (perm === 'granted') {
-      setTestNotifMsg('Notifications activées avec succès !');
+      setTestNotifMsg('✅ Notifications Push activées avec succès sur cet appareil !');
+      // Trigger a welcoming sample ready notification
+      sendOrderStatusNotification({
+        idCommande: 'TEST-OK',
+        table: 'T-01',
+        statut: 'Servie',
+        nomServeuse: currentServeuse?.nom || 'Serveuse',
+        department: 'all'
+      });
     } else if (perm === 'denied') {
-      setTestNotifMsg('Les notifications sont bloquées dans les paramètres de votre navigateur.');
+      setTestNotifMsg('❌ Les notifications sont bloquées dans les paramètres de votre navigateur.');
     } else if (perm === 'unsupported') {
-      setTestNotifMsg('Votre navigateur ne prend pas en charge les notifications push.');
+      setTestNotifMsg('⚠️ Votre navigateur ne prend pas en charge les notifications push.');
+    }
+  };
+
+  const handleTestReadyNotification = async () => {
+    // 1. Trigger local ready bell chime & vibration
+    await sendOrderStatusNotification({
+      idCommande: 'TEST-PRÊTE',
+      table: 'T-04',
+      statut: 'Servie',
+      nomServeuse: currentServeuse?.nom || 'Serveuse',
+      department: currentServeuse?.role === 'barman' ? 'bar' : 'cuisine'
+    });
+
+    // 2. Trigger server Web Push
+    try {
+      const res = await fetch('/api/push/test', { 
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          type: 'ready', 
+          table: 'T-04', 
+          serveuse: currentServeuse?.nom || 'Serveuse' 
+        })
+      });
+      const data = await res.json();
+      setTestNotifMsg('🔔 Alerte Commande Prête émise (Cloche de service + Vibreur + Web Push) !');
+    } catch {
+      setTestNotifMsg('🔔 Cloche de service et vibreur émis localement !');
+    }
+  };
+
+  const handleTestPreparationNotification = async () => {
+    // 1. Trigger local preparation chime & vibration
+    await sendOrderStatusNotification({
+      idCommande: 'TEST-PREP',
+      table: 'T-02',
+      statut: 'En cuisine',
+      nomServeuse: currentServeuse?.nom || 'Serveuse',
+      department: currentServeuse?.role === 'barman' ? 'bar' : 'cuisine'
+    });
+
+    // 2. Trigger server Web Push
+    try {
+      await fetch('/api/push/test', { 
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ 
+          type: 'prep', 
+          table: 'T-02', 
+          serveuse: currentServeuse?.nom || 'Serveuse' 
+        })
+      });
+      setTestNotifMsg('👨‍🍳 Alerte En Préparation émise (Carillon ascendant + Vibreur + Web Push) !');
+    } catch {
+      setTestNotifMsg('👨‍🍳 Carillon de préparation et vibreur émis localement !');
     }
   };
 
@@ -161,7 +230,7 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
       const res = await fetch('/api/push/test', { method: 'POST' });
       const data = await res.json();
       if (data.success) {
-        setTestNotifMsg('Notification Web Push (Serveur ➔ APNs iOS / Android) envoyée avec succès !');
+        setTestNotifMsg('💰 Notification Web Push (Serveur ➔ APNs iOS / Android) envoyée avec succès !');
       } else {
         setTestNotifMsg('Alerte émise. Si les notifications ne s’affichent pas sur iOS, ajoutez la PWA à l’écran d’accueil.');
       }
@@ -214,6 +283,155 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
   // Modal for sensitive reset actions
   const [isResetModalOpen, setIsResetModalOpen] = useState<boolean>(false);
   const [loadingAction, setLoadingAction] = useState<boolean>(false);
+
+  // --- CONNECTED DEVICES & TARGETED NOTIFICATIONS BY ID ---
+  const [myDeviceId] = useState<string>(getOrCreateDeviceId());
+  const [myDeviceName, setMyDeviceName] = useState<string>(getDeviceName());
+  const [isEditingDeviceName, setIsEditingDeviceName] = useState<boolean>(false);
+  const [tempDeviceName, setTempDeviceName] = useState<string>(getDeviceName());
+  const [deviceSaveSuccess, setDeviceSaveSuccess] = useState<boolean>(false);
+  const [copiedDeviceId, setCopiedDeviceId] = useState<boolean>(false);
+
+  const [registeredDevices, setRegisteredDevices] = useState<DeviceRegistration[]>([]);
+  const [loadingDevices, setLoadingDevices] = useState<boolean>(false);
+  const [allProfiles, setAllProfiles] = useState<Serveuse[]>([]);
+
+  // Targeted Notification Form State
+  const [targetType, setTargetType] = useState<'profile' | 'device' | 'role' | 'all'>('profile');
+  const [selectedTargetProfile, setSelectedTargetProfile] = useState<string>(currentServeuse?.idServeuse || '');
+  const [selectedTargetDevice, setSelectedTargetDevice] = useState<string>(myDeviceId);
+  const [selectedTargetRole, setSelectedTargetRole] = useState<string>('cuisine');
+  const [customNotifTitle, setCustomNotifTitle] = useState<string>('🔔 Alerte Directe OrderEase');
+  const [customNotifBody, setCustomNotifBody] = useState<string>('Message test ciblé envoyé vers votre appareil.');
+  const [isSendingTargetedNotif, setIsSendingTargetedNotif] = useState<boolean>(false);
+  const [targetedNotifFeedback, setTargetedNotifFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
+  const loadDevices = async () => {
+    setLoadingDevices(true);
+    try {
+      const [devs, srvs] = await Promise.all([
+        posApi.getDevices(),
+        posApi.getServeuses()
+      ]);
+      setRegisteredDevices(devs);
+      setAllProfiles(srvs);
+      if (srvs.length > 0 && !selectedTargetProfile) {
+        setSelectedTargetProfile(currentServeuse?.idServeuse || srvs[0].idServeuse);
+      }
+    } catch (err) {
+      console.warn('Failed to load devices list:', err);
+    } finally {
+      setLoadingDevices(false);
+    }
+  };
+
+  useEffect(() => {
+    loadDevices();
+    // Register / heartbeat this device on view load
+    syncDeviceRegistration(currentServeuse || null).catch(() => {});
+  }, [currentServeuse]);
+
+  const handleSaveDeviceName = async () => {
+    const trimmed = tempDeviceName.trim();
+    if (!trimmed) return;
+    setDeviceName(trimmed);
+    setMyDeviceName(trimmed);
+    setIsEditingDeviceName(false);
+    setDeviceSaveSuccess(true);
+    await syncDeviceRegistration(currentServeuse || null);
+    await loadDevices();
+    setTimeout(() => setDeviceSaveSuccess(false), 3000);
+  };
+
+  const handleCopyDeviceId = () => {
+    navigator.clipboard?.writeText(myDeviceId);
+    setCopiedDeviceId(true);
+    setTimeout(() => setCopiedDeviceId(false), 2500);
+  };
+
+  const handleDeleteDevice = async (idAppareil: string) => {
+    try {
+      await posApi.deleteDevice(idAppareil);
+      await loadDevices();
+    } catch (e: any) {
+      console.error("Error deleting device:", e);
+    }
+  };
+
+  const handleSendTargetedPush = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!customNotifTitle.trim() || !customNotifBody.trim()) {
+      setTargetedNotifFeedback({ type: 'error', text: 'Veuillez saisir un titre et un message.' });
+      return;
+    }
+
+    setIsSendingTargetedNotif(true);
+    setTargetedNotifFeedback(null);
+
+    try {
+      const payload: any = {
+        title: customNotifTitle.trim(),
+        body: customNotifBody.trim(),
+        tag: `targeted-${Date.now()}`
+      };
+
+      if (targetType === 'profile') {
+        payload.targetIdProfil = selectedTargetProfile;
+      } else if (targetType === 'device') {
+        payload.targetIdAppareil = selectedTargetDevice;
+      } else if (targetType === 'role') {
+        payload.targetRole = selectedTargetRole;
+      } else {
+        payload.targetRole = 'all';
+      }
+
+      const res = await posApi.sendTargetedNotification(payload);
+      if (res.success) {
+        setTargetedNotifFeedback({
+          type: 'success',
+          text: `✅ Notification transmise avec succès ! (${res.count ?? 0} appareil(s) destinataire(s) ont reçu le push).`
+        });
+      } else {
+        setTargetedNotifFeedback({
+          type: 'error',
+          text: res.message || "Erreur lors de l'envoi de la notification ciblée."
+        });
+      }
+    } catch (err: any) {
+      setTargetedNotifFeedback({
+        type: 'error',
+        text: err.message || 'Erreur de connexion serveur.'
+      });
+    } finally {
+      setIsSendingTargetedNotif(false);
+    }
+  };
+
+  const handleQuickTestToProfile = async (idProfil: string, nomProfil: string) => {
+    setIsSendingTargetedNotif(true);
+    setTargetedNotifFeedback(null);
+    try {
+      const res = await posApi.sendTargetedNotification({
+        targetIdProfil: idProfil,
+        title: `🔔 Signal Direct pour ${nomProfil} (${idProfil})`,
+        body: `Alerte de test ciblée envoyée spécifiquement vers vos appareils enregistrés.`,
+        tag: `quick-target-${Date.now()}`
+      });
+      if (res.success) {
+        setTargetedNotifFeedback({
+          type: 'success',
+          text: `✅ Signal test envoyé vers le profil ${nomProfil} (${idProfil}) !`
+        });
+      }
+    } catch {
+      setTargetedNotifFeedback({
+        type: 'error',
+        text: "Erreur lors de l'envoi rapide."
+      });
+    } finally {
+      setIsSendingTargetedNotif(false);
+    }
+  };
 
   useEffect(() => {
     setSelectedCurrency(getCurrency());
@@ -271,8 +489,208 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
     { code: 'XAF', name: 'XAF', desc: 'Code ISO BEAC' },
   ];
 
+  const isAdmin = currentServeuse?.role === 'admin';
+
+  // =========================================================================
+  // VIEW FOR NON-ADMIN ROLES (Serveuse, Cuisine, Barman, Caissier)
+  // Restricted strictly to Push Notifications authorization and sound alerts
+  // =========================================================================
+  if (!isAdmin) {
+    return (
+      <div className="w-full max-w-5xl 2xl:max-w-6xl mx-auto min-h-full flex flex-col bg-slate-50 text-slate-800 p-3 sm:p-5 lg:p-6 pb-20 sm:pb-8 space-y-6">
+        
+        {/* Header Banner */}
+        <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-4 sm:p-6 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-4 relative overflow-hidden transition-colors duration-200">
+          <div className="absolute top-0 right-0 p-8 opacity-5 dark:opacity-10 pointer-events-none">
+            <Bell className="w-48 h-48 text-purple-600 dark:text-purple-400" />
+          </div>
+
+          <div className="flex items-center space-x-3.5 relative z-10">
+            <div className="w-12 h-12 rounded-2xl bg-purple-600 text-white flex items-center justify-center shadow-md shadow-purple-600/20 shrink-0">
+              <Bell className="w-6 h-6" />
+            </div>
+            <div>
+              <div className="flex items-center space-x-2">
+                <h2 className="font-extrabold text-base sm:text-xl text-slate-900 dark:text-white">
+                  Notifications Push & Alertes
+                </h2>
+                <span className="bg-purple-50 dark:bg-purple-950/60 text-purple-700 dark:text-purple-300 font-bold text-[10px] uppercase px-2 py-0.5 rounded-full border border-purple-200 dark:border-purple-800">
+                  {currentServeuse?.role === 'cuisine' ? '👨‍🍳 Cuisine' : currentServeuse?.role === 'barman' ? '🍹 Barman' : currentServeuse?.role === 'caissier' ? '💰 Caissier' : '💁‍♀️ Serveuse'}
+                </span>
+              </div>
+              <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                Autorisez votre appareil pour recevoir les sonneries et notifications instantanées
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center space-x-2 self-start sm:self-center shrink-0 relative z-10">
+            <span className={`text-xs uppercase font-extrabold px-3.5 py-1.5 rounded-xl border flex items-center space-x-1.5 ${
+              notifPermission === 'granted'
+                ? 'bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-400 border-emerald-300 dark:border-emerald-800'
+                : notifPermission === 'denied'
+                ? 'bg-red-50 dark:bg-red-950/60 text-red-700 dark:text-red-400 border-red-200 dark:border-red-800'
+                : 'bg-amber-50 dark:bg-amber-950/60 text-amber-700 dark:text-amber-400 border-amber-300 dark:border-amber-800 animate-pulse'
+            }`}>
+              <span className={`w-2 h-2 rounded-full ${notifPermission === 'granted' ? 'bg-emerald-500' : notifPermission === 'denied' ? 'bg-red-500' : 'bg-amber-500 animate-ping'}`} />
+              <span>{notifPermission === 'granted' ? 'Push Activé sur cet appareil' : notifPermission === 'denied' ? 'Push Bloqué' : 'Push Non Autorisé'}</span>
+            </span>
+          </div>
+        </div>
+
+        {/* Main Push Notification Settings Card */}
+        <div className="bg-white dark:bg-slate-900 border-2 border-purple-200 dark:border-purple-800/80 rounded-3xl p-4 sm:p-6 shadow-sm space-y-5 transition-colors duration-200 max-w-4xl">
+          <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-3">
+            <div className="flex items-center space-x-2.5">
+              <div className="w-10 h-10 rounded-2xl bg-purple-600 text-white flex items-center justify-center shadow-md shadow-purple-600/30">
+                <Bell className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="font-extrabold text-sm sm:text-base text-slate-900 dark:text-white flex items-center space-x-2">
+                  <span>Autorisation des Notifications Push</span>
+                </h3>
+                <p className="text-xs text-slate-500 dark:text-slate-400">
+                  Soyez averti instantanément avec signal sonore et vibreur lors des changements de commande
+                </p>
+              </div>
+            </div>
+          </div>
+
+          <div className="space-y-4">
+            {/* Permission Banner */}
+            {notifPermission !== 'granted' ? (
+              <div className="p-5 rounded-2xl bg-gradient-to-r from-purple-700 via-purple-600 to-indigo-700 text-white shadow-lg flex flex-col sm:flex-row items-center justify-between gap-4">
+                <div className="space-y-1.5 text-center sm:text-left">
+                  <div className="font-black text-base flex items-center justify-center sm:justify-start space-x-2">
+                    <Sparkles className="w-5 h-5 text-amber-300" />
+                    <span>Cliquez pour activer les notifications push sur votre appareil</span>
+                  </div>
+                  <p className="text-xs text-purple-100 leading-relaxed max-w-xl">
+                    {currentServeuse?.role === 'serveuse' 
+                      ? "Vous recevrez une sonnerie de cloche dès que la cuisine ou le bar signale qu'une commande est PRÊTE à être servie."
+                      : currentServeuse?.role === 'cuisine' || currentServeuse?.role === 'barman'
+                      ? "Vous recevrez une alerte sonore dès qu'une nouvelle commande est envoyée par une serveuse."
+                      : "Vous recevrez les alertes de commandes et de règlements en direct."}
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleEnableNotifications}
+                  className="w-full sm:w-auto bg-white hover:bg-purple-50 text-purple-900 font-black py-3 px-6 rounded-2xl text-sm shadow-xl active:scale-95 transition-all touch-manipulation flex items-center justify-center space-x-2 shrink-0"
+                >
+                  <Bell className="w-5 h-5 text-purple-600" />
+                  <span>Autoriser les Notifications</span>
+                </button>
+              </div>
+            ) : (
+              <div className="p-4 rounded-2xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800/80 text-emerald-800 dark:text-emerald-200 text-xs font-bold flex items-center space-x-3">
+                <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0" />
+                <div>
+                  <div className="text-sm font-extrabold text-emerald-900 dark:text-emerald-100">Notifications Push Actives</div>
+                  <p className="text-[11px] text-emerald-700 dark:text-emerald-300 mt-0.5">Votre terminal est correctement enregistré pour recevoir les sonneries de cloche et les notifications push.</p>
+                </div>
+              </div>
+            )}
+
+            {testNotifMsg && (
+              <div className="p-3.5 rounded-xl bg-purple-50 dark:bg-purple-950/60 border border-purple-200 dark:border-purple-800 text-purple-900 dark:text-purple-200 text-xs font-bold flex items-center justify-between animate-fade-in">
+                <span>{testNotifMsg}</span>
+                <button onClick={() => setTestNotifMsg(null)} className="text-purple-600 dark:text-purple-400 hover:opacity-80 font-mono text-base font-black px-2">×</button>
+              </div>
+            )}
+
+            {/* Testing Buttons */}
+            <div className="space-y-2 pt-2">
+              <div className="text-xs font-bold text-slate-700 dark:text-slate-300 flex items-center space-x-1.5">
+                <Volume2 className="w-4 h-4 text-purple-600" />
+                <span>Tester les alertes sonores de votre rôle :</span>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                <button
+                  type="button"
+                  onClick={handleTestReadyNotification}
+                  className="p-3.5 rounded-2xl bg-purple-50 dark:bg-purple-950/50 hover:bg-purple-100 dark:hover:bg-purple-900/60 border border-purple-200 dark:border-purple-800 text-purple-900 dark:text-purple-200 text-xs font-bold flex flex-col items-center text-center space-y-1.5 active:scale-95 transition-all touch-manipulation shadow-2xs"
+                >
+                  <div className="p-2 bg-purple-600 text-white rounded-xl shadow-xs">
+                    <Bell className="w-4 h-4" />
+                  </div>
+                  <span className="font-extrabold text-sm">🔔 Commande Prête</span>
+                  <span className="text-[10px] text-purple-600 dark:text-purple-400 font-normal">Cloche de restaurant + Vibreur</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleTestPreparationNotification}
+                  className="p-3.5 rounded-2xl bg-amber-50 dark:bg-amber-950/50 hover:bg-amber-100 dark:hover:bg-amber-900/60 border border-amber-200 dark:border-amber-800 text-amber-900 dark:text-amber-200 text-xs font-bold flex flex-col items-center text-center space-y-1.5 active:scale-95 transition-all touch-manipulation shadow-2xs"
+                >
+                  <div className="p-2 bg-amber-600 text-white rounded-xl shadow-xs">
+                    <ChefHat className="w-4 h-4" />
+                  </div>
+                  <span className="font-extrabold text-sm">👨‍🍳 En Préparation</span>
+                  <span className="text-[10px] text-amber-600 dark:text-amber-400 font-normal">Carillon ascendant + Vibreur</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleTestPaymentNotification}
+                  className="p-3.5 rounded-2xl bg-emerald-50 dark:bg-emerald-950/50 hover:bg-emerald-100 dark:hover:bg-emerald-900/60 border border-emerald-200 dark:border-emerald-800 text-emerald-900 dark:text-emerald-200 text-xs font-bold flex flex-col items-center text-center space-y-1.5 active:scale-95 transition-all touch-manipulation shadow-2xs"
+                >
+                  <div className="p-2 bg-emerald-600 text-white rounded-xl shadow-xs">
+                    <Coins className="w-4 h-4" />
+                  </div>
+                  <span className="font-extrabold text-sm">💰 Paiement Encaissé</span>
+                  <span className="text-[10px] text-emerald-600 dark:text-emerald-400 font-normal">Double-ton caisse + Vibreur</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Smartphone Compatibility Card */}
+            <div className="bg-slate-50 dark:bg-slate-800/60 p-4 rounded-2xl border border-slate-200 dark:border-slate-700/80 text-xs text-slate-700 dark:text-slate-300 space-y-2">
+              <div className="flex items-center space-x-2 font-bold text-slate-900 dark:text-white">
+                <Smartphone className="w-4 h-4 text-purple-600 dark:text-purple-400" />
+                <span>Guide de réception sur Smartphone (Android & iPhone)</span>
+              </div>
+              <p className="text-slate-600 dark:text-slate-400 leading-relaxed text-[11px]">
+                • <strong>Android :</strong> Dès l'autorisation accordée, les notifications et alertes s'affichent automatiquement dans la barre supérieure du téléphone.<br />
+                • <strong>iPhone / iPad (iOS 16.4+) :</strong> Pour recevoir les notifications lorsque l'écran est verrouillé, ouvrez l'application dans Safari, appuyez sur le bouton <strong>Partager</strong> ➔ puis <strong>Sur l'écran d'accueil</strong>.
+              </p>
+            </div>
+          </div>
+        </div>
+
+        {/* User Session & Logout */}
+        <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-4 sm:p-5 shadow-xs flex flex-col sm:flex-row items-center justify-between gap-4 max-w-4xl transition-colors duration-200">
+          <div className="flex items-center space-x-3.5 text-left w-full sm:w-auto">
+            <div className="w-10 h-10 rounded-2xl bg-red-50 dark:bg-red-950/60 border border-red-200 dark:border-red-900/60 text-red-600 dark:text-red-400 flex items-center justify-center shrink-0">
+              <LogOut className="w-5 h-5" />
+            </div>
+            <div>
+              <h3 className="font-extrabold text-sm text-slate-900 dark:text-white">Session Active</h3>
+              <p className="text-xs text-slate-500 dark:text-slate-400">
+                Connecté en tant que <strong className="text-slate-800 dark:text-slate-200">{currentServeuse?.nom || 'Utilisateur'}</strong> ({currentServeuse?.role})
+              </p>
+            </div>
+          </div>
+
+          <button
+            onClick={onLogout}
+            className="w-full sm:w-auto px-5 py-2.5 bg-red-600 hover:bg-red-700 text-white font-extrabold text-xs rounded-xl shadow-md shadow-red-600/20 transition-all flex items-center justify-center space-x-2 touch-manipulation active:scale-95 shrink-0"
+          >
+            <LogOut className="w-4 h-4" />
+            <span>Se Déconnecter</span>
+          </button>
+        </div>
+
+      </div>
+    );
+  }
+
+  // =========================================================================
+  // VIEW FOR ADMINISTRATOR (Full access to all settings)
+  // =========================================================================
   return (
-    <div className="w-full min-h-full flex flex-col bg-slate-50 text-slate-800 p-3 sm:p-6 pb-20 sm:pb-8 space-y-6">
+    <div className="w-full max-w-[1700px] mx-auto min-h-full flex flex-col bg-slate-50 dark:bg-slate-950 text-slate-800 dark:text-slate-100 p-3 sm:p-5 lg:p-6 pb-20 sm:pb-8 space-y-6">
       
       {/* Header Banner */}
       <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-4 sm:p-6 shadow-xs flex flex-col sm:flex-row sm:items-center justify-between gap-4 relative overflow-hidden transition-colors duration-200">
@@ -382,69 +800,480 @@ export const SettingsView: React.FC<SettingsViewProps> = ({
             </div>
           </div>
 
-          {/* Card: Notifications PWA & Alertes Paiement (Android & iOS) */}
-          <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-3xl p-4 sm:p-6 shadow-xs space-y-4 transition-colors duration-200">
+          {/* Card: Notifications PWA & Alertes en Direct (Cuisine / Bar / Serveuse) */}
+          <div className="bg-white dark:bg-slate-900 border-2 border-purple-200 dark:border-purple-800/80 rounded-3xl p-4 sm:p-6 shadow-sm space-y-4 transition-colors duration-200">
             <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-3">
               <div className="flex items-center space-x-2.5">
-                <div className="w-9 h-9 rounded-xl bg-purple-50 dark:bg-purple-950/60 border border-purple-200 dark:border-purple-800/80 text-purple-600 dark:text-purple-400 flex items-center justify-center">
+                <div className="w-10 h-10 rounded-2xl bg-purple-600 text-white flex items-center justify-center shadow-md shadow-purple-600/30">
                   <Bell className="w-5 h-5" />
                 </div>
                 <div>
-                  <h3 className="font-extrabold text-sm sm:text-base text-slate-900 dark:text-white">Notifications PWA & Alertes Paiement</h3>
-                  <p className="text-xs text-slate-500 dark:text-slate-400">Recevez un signal sonore, vibreur et notification dès qu'une commande est payée</p>
+                  <h3 className="font-extrabold text-sm sm:text-base text-slate-900 dark:text-white flex items-center space-x-2">
+                    <span>Notifications Push & Alertes Sonores</span>
+                    <span className="text-[10px] bg-purple-100 dark:bg-purple-950/80 text-purple-700 dark:text-purple-300 px-2 py-0.5 rounded-full font-bold">
+                      Cuisine • Bar • Serveuse
+                    </span>
+                  </h3>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">
+                    Alerte sonore de cloche, carillon et vibreur dès qu'une commande passe en préparation ou est prête
+                  </p>
                 </div>
               </div>
-              <span className={`text-[10px] uppercase font-bold px-2.5 py-1 rounded-full border ${
+              <span className={`text-[10px] uppercase font-extrabold px-3 py-1 rounded-full border ${
                 notifPermission === 'granted'
-                  ? 'bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-400 border-emerald-200 dark:border-emerald-800'
+                  ? 'bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-400 border-emerald-300 dark:border-emerald-800 animate-pulse'
                   : notifPermission === 'denied'
                   ? 'bg-red-50 dark:bg-red-950/60 text-red-700 dark:text-red-400 border-red-200 dark:border-red-800'
-                  : 'bg-amber-50 dark:bg-amber-950/60 text-amber-700 dark:text-amber-400 border-amber-200 dark:border-amber-800'
+                  : 'bg-amber-50 dark:bg-amber-950/60 text-amber-700 dark:text-amber-400 border-amber-300 dark:border-amber-800'
               }`}>
-                {notifPermission === 'granted' ? 'Activé' : notifPermission === 'denied' ? 'Bloqué' : 'Non activé'}
+                {notifPermission === 'granted' ? '✅ Push Actif' : notifPermission === 'denied' ? '❌ Bloqué' : '⚠️ À Activer'}
               </span>
             </div>
 
-            <div className="space-y-3">
-              <div className="bg-slate-50 dark:bg-slate-800/60 p-3.5 rounded-2xl border border-slate-200 dark:border-slate-700/80 text-xs text-slate-700 dark:text-slate-300 space-y-2">
-                <div className="flex items-center space-x-2 font-bold text-slate-900 dark:text-white">
-                  <Smartphone className="w-4 h-4 text-purple-600 dark:text-purple-400" />
-                  <span>Compatibilité Mobile (Android & iOS Safari)</span>
+            <div className="space-y-4">
+              {/* Permission Banner */}
+              {notifPermission !== 'granted' ? (
+                <div className="p-4 rounded-2xl bg-gradient-to-r from-purple-600 to-indigo-600 text-white shadow-md flex flex-col sm:flex-row items-center justify-between gap-3">
+                  <div className="space-y-1 text-center sm:text-left">
+                    <div className="font-black text-sm flex items-center justify-center sm:justify-start space-x-1.5">
+                      <Sparkles className="w-4 h-4 text-amber-300" />
+                      <span>Autorisez les notifications push pour ce terminal</span>
+                    </div>
+                    <p className="text-xs text-purple-100">
+                      Permet à la serveuse de recevoir un signal sonore dès que le cuisinier ou le barman prépare ou termine la commande.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleEnableNotifications}
+                    className="w-full sm:w-auto bg-white hover:bg-purple-50 text-purple-900 font-extrabold py-2.5 px-5 rounded-xl text-xs shadow-lg active:scale-95 transition-all touch-manipulation flex items-center justify-center space-x-2 shrink-0"
+                  >
+                    <Bell className="w-4 h-4 text-purple-600" />
+                    <span>Autoriser les Notifications</span>
+                  </button>
                 </div>
-                <p className="text-slate-600 dark:text-slate-400 leading-relaxed text-[11px]">
-                  • <strong>Android :</strong> Fonctionne directement via le ServiceWorker Web Push.<br />
-                  • <strong>iPhone / iOS (16.4+) :</strong> Sur iPhone, Apple exige que l'application soit ajoutée à l'écran d'accueil (Safari ➔ Bouton Partager ➔ <i>Sur l'écran d'accueil</i>) pour recevoir les notifications Push en arrière-plan lorsque l'application est fermée.
-                </p>
-              </div>
+              ) : (
+                <div className="p-3 rounded-2xl bg-emerald-50 dark:bg-emerald-950/40 border border-emerald-200 dark:border-emerald-800/80 text-emerald-800 dark:text-emerald-200 text-xs font-bold flex items-center space-x-2">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                  <span>Notifications Push autorisées et connectées au serveur.</span>
+                </div>
+              )}
 
               {testNotifMsg && (
                 <div className="p-3 rounded-xl bg-purple-50 dark:bg-purple-950/60 border border-purple-200 dark:border-purple-800 text-purple-900 dark:text-purple-200 text-xs font-bold flex items-center justify-between">
                   <span>{testNotifMsg}</span>
-                  <button onClick={() => setTestNotifMsg(null)} className="text-purple-600 dark:text-purple-400 hover:opacity-80 font-mono">×</button>
+                  <button onClick={() => setTestNotifMsg(null)} className="text-purple-600 dark:text-purple-400 hover:opacity-80 font-mono text-sm font-black">×</button>
                 </div>
               )}
 
-              <div className="flex flex-col sm:flex-row gap-2.5 pt-1">
-                {notifPermission !== 'granted' && (
+              {/* Testing Buttons */}
+              <div className="space-y-2">
+                <div className="text-xs font-bold text-slate-700 dark:text-slate-300 flex items-center space-x-1.5">
+                  <Volume2 className="w-4 h-4 text-purple-600" />
+                  <span>Tester les sonneries et alertes en direct :</span>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                   <button
                     type="button"
-                    onClick={handleEnableNotifications}
-                    className="flex-1 bg-purple-600 hover:bg-purple-700 text-white font-bold py-2.5 px-4 rounded-xl text-xs flex items-center justify-center space-x-2 shadow-sm active:scale-95 transition-all touch-manipulation"
+                    onClick={handleTestReadyNotification}
+                    className="p-3 rounded-xl bg-purple-50 dark:bg-purple-950/50 hover:bg-purple-100 dark:hover:bg-purple-900/60 border border-purple-200 dark:border-purple-800 text-purple-900 dark:text-purple-200 text-xs font-bold flex flex-col items-center text-center space-y-1 active:scale-95 transition-all touch-manipulation"
                   >
-                    <Bell className="w-4 h-4" />
-                    <span>Autoriser les Notifications Push</span>
+                    <div className="p-1.5 bg-purple-600 text-white rounded-lg">
+                      <Bell className="w-4 h-4" />
+                    </div>
+                    <span>🔔 Commande Prête</span>
+                    <span className="text-[10px] text-purple-600 dark:text-purple-400 font-normal">Cloche restaurant + Vibreur</span>
                   </button>
-                )}
+
+                  <button
+                    type="button"
+                    onClick={handleTestPreparationNotification}
+                    className="p-3 rounded-xl bg-amber-50 dark:bg-amber-950/50 hover:bg-amber-100 dark:hover:bg-amber-900/60 border border-amber-200 dark:border-amber-800 text-amber-900 dark:text-amber-200 text-xs font-bold flex flex-col items-center text-center space-y-1 active:scale-95 transition-all touch-manipulation"
+                  >
+                    <div className="p-1.5 bg-amber-600 text-white rounded-lg">
+                      <ChefHat className="w-4 h-4" />
+                    </div>
+                    <span>👨‍🍳 En Préparation</span>
+                    <span className="text-[10px] text-amber-600 dark:text-amber-400 font-normal">Carillon ascendant + Vibreur</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleTestPaymentNotification}
+                    className="p-3 rounded-xl bg-emerald-50 dark:bg-emerald-950/50 hover:bg-emerald-100 dark:hover:bg-emerald-900/60 border border-emerald-200 dark:border-emerald-800 text-emerald-900 dark:text-emerald-200 text-xs font-bold flex flex-col items-center text-center space-y-1 active:scale-95 transition-all touch-manipulation"
+                  >
+                    <div className="p-1.5 bg-emerald-600 text-white rounded-lg">
+                      <Coins className="w-4 h-4" />
+                    </div>
+                    <span>💰 Paiement Encaissé</span>
+                    <span className="text-[10px] text-emerald-600 dark:text-emerald-400 font-normal">Double-ton caisse + Vibreur</span>
+                  </button>
+                </div>
+              </div>
+
+              <div className="bg-slate-50 dark:bg-slate-800/60 p-3.5 rounded-2xl border border-slate-200 dark:border-slate-700/80 text-xs text-slate-700 dark:text-slate-300 space-y-1.5">
+                <div className="flex items-center space-x-2 font-bold text-slate-900 dark:text-white">
+                  <Smartphone className="w-4 h-4 text-purple-600 dark:text-purple-400" />
+                  <span>Compatibilité Smartphone (Android & iPhone PWA)</span>
+                </div>
+                <p className="text-slate-600 dark:text-slate-400 leading-relaxed text-[11px]">
+                  • <strong>Android :</strong> Les notifications s'affichent automatiquement dans la barre système.<br />
+                  • <strong>iPhone / iOS (16.4+) :</strong> Ajoutez l'application à l'écran d'accueil (Bouton Partager Safari ➔ <i>Sur l'écran d'accueil</i>) pour recevoir les pushs en arrière-plan lorsque votre iPhone est verrouillé.
+                </p>
+              </div>
+            </div>
+          </div>
+
+          {/* Card: Appareils Connectés & Routage des Notifications par ID */}
+          <div className="bg-white dark:bg-slate-900 border-2 border-indigo-200 dark:border-indigo-800/80 rounded-3xl p-4 sm:p-6 shadow-sm space-y-5 transition-colors duration-200">
+            <div className="flex items-center justify-between border-b border-slate-100 dark:border-slate-800 pb-3">
+              <div className="flex items-center space-x-2.5">
+                <div className="w-10 h-10 rounded-2xl bg-indigo-600 text-white flex items-center justify-center shadow-md shadow-indigo-600/30">
+                  <Radio className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-extrabold text-sm sm:text-base text-slate-900 dark:text-white flex items-center space-x-2">
+                    <span>Appareils & Routage par ID</span>
+                    <span className="text-[10px] bg-indigo-100 dark:bg-indigo-950/80 text-indigo-700 dark:text-indigo-300 px-2 py-0.5 rounded-full font-bold">
+                      Tri par ID
+                    </span>
+                  </h3>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">
+                    Identification unique de chaque terminal (ID Appareil) et ciblage précis des notifications par ID de profil
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={loadDevices}
+                disabled={loadingDevices}
+                className="p-2 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 rounded-xl transition-all active:scale-95 text-xs font-bold flex items-center space-x-1.5"
+                title="Actualiser la liste des appareils"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${loadingDevices ? 'animate-spin' : ''}`} />
+                <span className="hidden sm:inline">Actualiser</span>
+              </button>
+            </div>
+
+            {/* 1. Mon Appareil Actuel */}
+            <div className="bg-indigo-50/60 dark:bg-indigo-950/40 border border-indigo-200 dark:border-indigo-800/80 rounded-2xl p-4 space-y-3">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div className="flex items-center space-x-2">
+                  <div className="w-7 h-7 rounded-lg bg-indigo-600 text-white flex items-center justify-center text-xs font-bold">
+                    <Smartphone className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <span className="text-xs font-extrabold text-indigo-950 dark:text-indigo-200">Ce Terminal (Appareil Actuel)</span>
+                    <div className="text-[10px] text-indigo-700 dark:text-indigo-300">
+                      ID assigné automatiquement et conservé en mémoire locale
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex items-center space-x-2">
+                  <span className="text-[11px] font-mono font-black bg-white dark:bg-slate-900 text-indigo-700 dark:text-indigo-300 px-2.5 py-1 rounded-lg border border-indigo-200 dark:border-indigo-700 flex items-center space-x-1.5 shadow-xs">
+                    <span>{myDeviceId}</span>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleCopyDeviceId}
+                    className="p-1.5 bg-white dark:bg-slate-900 hover:bg-indigo-100 dark:hover:bg-indigo-900/50 text-indigo-600 dark:text-indigo-400 rounded-lg border border-indigo-200 dark:border-indigo-700 text-xs transition-all active:scale-95"
+                    title="Copier l'ID Appareil"
+                  >
+                    {copiedDeviceId ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
+                  </button>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1 text-xs">
+                {/* Friendly Name */}
+                <div className="bg-white dark:bg-slate-900 p-2.5 rounded-xl border border-indigo-100 dark:border-indigo-900/60 flex items-center justify-between">
+                  <div className="truncate mr-2">
+                    <span className="text-[10px] text-slate-400 block uppercase font-bold">Nom de l'appareil</span>
+                    {isEditingDeviceName ? (
+                      <input
+                        type="text"
+                        value={tempDeviceName}
+                        onChange={(e) => setTempDeviceName(e.target.value)}
+                        className="mt-0.5 bg-slate-100 dark:bg-slate-800 px-2 py-1 rounded-lg font-bold text-xs text-slate-900 dark:text-white outline-none border border-indigo-400 w-full"
+                        placeholder="Ex: Caisse Principale, Tablette Cuisine"
+                        autoFocus
+                      />
+                    ) : (
+                      <span className="font-bold text-slate-800 dark:text-slate-200 text-xs">{myDeviceName}</span>
+                    )}
+                  </div>
+                  <div>
+                    {isEditingDeviceName ? (
+                      <button
+                        type="button"
+                        onClick={handleSaveDeviceName}
+                        className="px-2.5 py-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-bold text-[10px]"
+                      >
+                        Sauver
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setTempDeviceName(myDeviceName);
+                          setIsEditingDeviceName(true);
+                        }}
+                        className="px-2 py-1 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 rounded-lg text-[10px] font-bold"
+                      >
+                        Renommer
+                      </button>
+                    )}
+                  </div>
+                </div>
+
+                {/* Bound Profile */}
+                <div className="bg-white dark:bg-slate-900 p-2.5 rounded-xl border border-indigo-100 dark:border-indigo-900/60">
+                  <span className="text-[10px] text-slate-400 block uppercase font-bold">Profil Connecté sur cet appareil</span>
+                  <div className="flex items-center space-x-1.5 mt-0.5 font-bold text-slate-800 dark:text-slate-200 text-xs">
+                    <span className="font-mono bg-indigo-50 dark:bg-indigo-950 text-indigo-700 dark:text-indigo-300 px-1.5 py-0.5 rounded text-[10px]">
+                      {currentServeuse?.idServeuse || 'INVITÉ'}
+                    </span>
+                    <span>{currentServeuse?.nom || 'Non connecté'}</span>
+                    <span className="text-[10px] text-slate-400 font-normal">({currentServeuse?.role || 'serveuse'})</span>
+                  </div>
+                </div>
+              </div>
+
+              {deviceSaveSuccess && (
+                <div className="text-[11px] text-emerald-700 dark:text-emerald-400 font-bold flex items-center space-x-1">
+                  <CheckCircle2 className="w-3.5 h-3.5" />
+                  <span>Nom de l'appareil synchronisé avec le serveur.</span>
+                </div>
+              )}
+            </div>
+
+            {/* 2. Émetteur de Notifications Push Ciblées par ID */}
+            <div className="bg-slate-50 dark:bg-slate-800/40 border border-slate-200 dark:border-slate-700/80 rounded-2xl p-4 space-y-3">
+              <div className="flex items-center space-x-2">
+                <Send className="w-4 h-4 text-indigo-600 dark:text-indigo-400" />
+                <h4 className="font-extrabold text-xs text-slate-900 dark:text-white uppercase tracking-wider">
+                  Tester l'envoi ciblé par ID de profil ou appareil
+                </h4>
+              </div>
+
+              {targetedNotifFeedback && (
+                <div className={`p-3 rounded-xl text-xs font-bold flex items-center justify-between ${
+                  targetedNotifFeedback.type === 'success'
+                    ? 'bg-emerald-50 dark:bg-emerald-950/60 text-emerald-800 dark:text-emerald-200 border border-emerald-200 dark:border-emerald-800'
+                    : 'bg-red-50 dark:bg-red-950/60 text-red-800 dark:text-red-200 border border-red-200 dark:border-red-800'
+                }`}>
+                  <span>{targetedNotifFeedback.text}</span>
+                  <button onClick={() => setTargetedNotifFeedback(null)} className="font-mono font-bold text-sm ml-2">×</button>
+                </div>
+              )}
+
+              <form onSubmit={handleSendTargetedPush} className="space-y-3 text-xs">
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                  {/* Type of Target */}
+                  <div>
+                    <label className="block text-slate-600 dark:text-slate-400 font-bold mb-1">Cibler par :</label>
+                    <select
+                      value={targetType}
+                      onChange={(e) => setTargetType(e.target.value as any)}
+                      className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl px-2.5 py-2 font-bold text-slate-800 dark:text-slate-200 outline-none focus:border-indigo-500"
+                    >
+                      <option value="profile">👤 Profil spécifique (par ID)</option>
+                      <option value="device">📱 Appareil spécifique (par ID)</option>
+                      <option value="role">👥 Rôle métier</option>
+                      <option value="all">📢 Tous les appareils</option>
+                    </select>
+                  </div>
+
+                  {/* Target Value based on Selection */}
+                  <div className="sm:col-span-2">
+                    <label className="block text-slate-600 dark:text-slate-400 font-bold mb-1">
+                      {targetType === 'profile' && 'Sélectionner le Profil destinataire :'}
+                      {targetType === 'device' && "Sélectionner l'Appareil destinataire :"}
+                      {targetType === 'role' && 'Sélectionner le Rôle destinataire :'}
+                      {targetType === 'all' && 'Diffusion globale :'}
+                    </label>
+
+                    {targetType === 'profile' && (
+                      <select
+                        value={selectedTargetProfile}
+                        onChange={(e) => setSelectedTargetProfile(e.target.value)}
+                        className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl px-2.5 py-2 font-bold text-slate-800 dark:text-slate-200 outline-none focus:border-indigo-500 font-mono"
+                      >
+                        {allProfiles.map((p) => (
+                          <option key={p.idServeuse} value={p.idServeuse}>
+                            {p.idServeuse} • {p.nom} ({p.role})
+                          </option>
+                        ))}
+                      </select>
+                    )}
+
+                    {targetType === 'device' && (
+                      <select
+                        value={selectedTargetDevice}
+                        onChange={(e) => setSelectedTargetDevice(e.target.value)}
+                        className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl px-2.5 py-2 font-bold text-slate-800 dark:text-slate-200 outline-none focus:border-indigo-500 font-mono"
+                      >
+                        {registeredDevices.map((d) => (
+                          <option key={d.idAppareil} value={d.idAppareil}>
+                            {d.idAppareil} • {d.nomAppareil} ({d.nomProfil})
+                          </option>
+                        ))}
+                        {registeredDevices.length === 0 && (
+                          <option value={myDeviceId}>{myDeviceId} • Ce terminal</option>
+                        )}
+                      </select>
+                    )}
+
+                    {targetType === 'role' && (
+                      <select
+                        value={selectedTargetRole}
+                        onChange={(e) => setSelectedTargetRole(e.target.value)}
+                        className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl px-2.5 py-2 font-bold text-slate-800 dark:text-slate-200 outline-none focus:border-indigo-500"
+                      >
+                        <option value="cuisine">👨‍🍳 Cuisine</option>
+                        <option value="barman">🍹 Barman</option>
+                        <option value="serveuse">🛎️ Serveuses</option>
+                        <option value="caissier">💰 Caissier</option>
+                        <option value="admin">👑 Administrateur</option>
+                      </select>
+                    )}
+
+                    {targetType === 'all' && (
+                      <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2 text-slate-500 font-medium">
+                        Diffusion à l'ensemble des {registeredDevices.length || 1} appareil(s) enregistrés.
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  <div>
+                    <label className="block text-slate-600 dark:text-slate-400 font-bold mb-1">Titre de la notif :</label>
+                    <input
+                      type="text"
+                      value={customNotifTitle}
+                      onChange={(e) => setCustomNotifTitle(e.target.value)}
+                      className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2 font-medium text-slate-900 dark:text-white outline-none focus:border-indigo-500"
+                      placeholder="Ex: 🔔 Commande Table T-03 Prête"
+                      required
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-slate-600 dark:text-slate-400 font-bold mb-1">Message :</label>
+                    <input
+                      type="text"
+                      value={customNotifBody}
+                      onChange={(e) => setCustomNotifBody(e.target.value)}
+                      className="w-full bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl px-3 py-2 font-medium text-slate-900 dark:text-white outline-none focus:border-indigo-500"
+                      placeholder="Ex: Vos plats sont prêts au passe-plat."
+                      required
+                    />
+                  </div>
+                </div>
 
                 <button
-                  type="button"
-                  onClick={handleTestPaymentNotification}
-                  className="flex-1 bg-slate-100 dark:bg-slate-800 hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-800 dark:text-slate-200 font-bold py-2.5 px-4 rounded-xl text-xs border border-slate-200 dark:border-slate-700 flex items-center justify-center space-x-2 active:scale-95 transition-all touch-manipulation"
+                  type="submit"
+                  disabled={isSendingTargetedNotif}
+                  className="w-full sm:w-auto px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white font-extrabold rounded-xl shadow-md shadow-indigo-600/20 transition-all flex items-center justify-center space-x-2 active:scale-95 touch-manipulation"
                 >
-                  <Volume2 className="w-4 h-4 text-purple-600 dark:text-purple-400" />
-                  <span>Tester la Notification de Paiement</span>
+                  <Send className={`w-3.5 h-3.5 ${isSendingTargetedNotif ? 'animate-bounce' : ''}`} />
+                  <span>{isSendingTargetedNotif ? 'Envoi en cours...' : 'Envoyer la Notification Push Ciblée'}</span>
                 </button>
+              </form>
+            </div>
+
+            {/* 3. Registre des Appareils Enregistrés (Triés par ID) */}
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center space-x-1.5 font-bold text-xs text-slate-800 dark:text-slate-200">
+                  <Users className="w-4 h-4 text-indigo-600" />
+                  <span>Terminaux & Téléphones Enregistrés ({registeredDevices.length})</span>
+                  <span className="text-[10px] font-normal text-slate-400 font-mono">Triés par ID Appareil</span>
+                </div>
               </div>
+
+              {registeredDevices.length === 0 ? (
+                <div className="p-4 rounded-2xl bg-slate-50 dark:bg-slate-800/40 border border-dashed border-slate-200 dark:border-slate-700 text-center text-xs text-slate-500">
+                  Aucun autre appareil enregistré pour le moment. Ouvrez OrderEase sur d'autres smartphones pour les voir apparaître automatiquement triés par ID.
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+                  {registeredDevices.map((dev) => {
+                    const isCurrent = dev.idAppareil === myDeviceId;
+                    return (
+                      <div
+                        key={dev.idAppareil}
+                        className={`p-3.5 rounded-2xl border transition-all ${
+                          isCurrent
+                            ? 'bg-indigo-50/50 dark:bg-indigo-950/30 border-indigo-300 dark:border-indigo-700 shadow-xs'
+                            : 'bg-white dark:bg-slate-900 border-slate-200 dark:border-slate-800'
+                        }`}
+                      >
+                        <div className="flex items-start justify-between">
+                          <div>
+                            <div className="flex items-center space-x-1.5">
+                              <span className="font-mono font-black text-xs text-indigo-700 dark:text-indigo-300 bg-indigo-100 dark:bg-indigo-900/60 px-2 py-0.5 rounded-md">
+                                {dev.idAppareil}
+                              </span>
+                              {isCurrent && (
+                                <span className="bg-emerald-100 dark:bg-emerald-950 text-emerald-700 dark:text-emerald-300 text-[10px] font-extrabold px-1.5 py-0.2 rounded">
+                                  Ce terminal
+                                </span>
+                              )}
+                            </div>
+                            <h5 className="font-extrabold text-xs text-slate-900 dark:text-white mt-1">
+                              {dev.nomAppareil || 'Appareil POS'}
+                            </h5>
+                          </div>
+
+                          <span className={`text-[10px] font-extrabold px-2 py-0.5 rounded-full border ${
+                            dev.hasPushSubscription || dev.subscription
+                              ? 'bg-emerald-50 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-400 border-emerald-200 dark:border-emerald-800'
+                              : 'bg-slate-100 dark:bg-slate-800 text-slate-500 border-slate-200 dark:border-slate-700'
+                          }`}>
+                            {dev.hasPushSubscription || dev.subscription ? 'Push Actif' : 'En attente'}
+                          </span>
+                        </div>
+
+                        <div className="mt-2.5 pt-2 border-t border-slate-100 dark:border-slate-800 flex items-center justify-between text-[11px]">
+                          <div>
+                            <span className="text-slate-400 block text-[9px] uppercase font-bold">Profil Associé</span>
+                            <span className="font-bold text-slate-700 dark:text-slate-300">
+                              <strong className="font-mono text-indigo-600 dark:text-indigo-400 mr-1">{dev.idProfil || 'GUEST'}</strong>
+                              {dev.nomProfil || 'Non assigné'}
+                            </span>
+                          </div>
+
+                          <div className="flex items-center space-x-1.5">
+                            {dev.idProfil && dev.idProfil !== 'GUEST' && (
+                              <button
+                                type="button"
+                                onClick={() => handleQuickTestToProfile(dev.idProfil, dev.nomProfil)}
+                                className="px-2 py-1 bg-indigo-50 dark:bg-indigo-950/60 hover:bg-indigo-100 dark:hover:bg-indigo-900/80 text-indigo-700 dark:text-indigo-300 rounded-lg text-[10px] font-bold transition-all"
+                                title="Envoyer notification test à ce profil"
+                              >
+                                Test Push
+                              </button>
+                            )}
+                            {!isCurrent && (
+                              <button
+                                type="button"
+                                onClick={() => handleDeleteDevice(dev.idAppareil)}
+                                className="p-1 text-slate-400 hover:text-red-600 rounded hover:bg-red-50 dark:hover:bg-red-950/40 transition-all"
+                                title="Supprimer ce terminal du registre"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           </div>
           
